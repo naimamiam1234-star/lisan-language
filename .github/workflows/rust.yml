@@ -23,3 +23,17 @@ jobs:
           cargo run -- examples/text.lsn
           cargo run -- examples/modules/main.lsn
           cargo run -- --check examples/modules/main.lsn
+      - name: Package Linux/macOS interpreter
+        if: runner.os != 'Windows'
+        run: tar -czf lisan-${{ runner.os }}.tar.gz -C target/release lisan
+      - name: Package Windows interpreter
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path target/release/lisan.exe -DestinationPath lisan-Windows.zip
+      - name: Upload ready-to-run interpreter
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisan-${{ runner.os }}
+          path: |
+            lisan-*.tar.gz
+            lisan-*.zip
+          if-no-files-found: error
