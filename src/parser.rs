@@ -48,6 +48,15 @@ impl Parser {
         Ok(statements)
     }
     fn statement(&mut self) -> Result<Stmt, String> {
+        if self.take(&TokenKind::Import) {
+            let path = match self.current().kind.clone() {
+                TokenKind::String(path) => { self.cursor += 1; path },
+                _ => return Err(self.error("استورد تتطلب مسار ملف بين علامتي اقتباس")),
+            };
+            self.semicolon()?;
+            return Ok(Stmt::Import(path));
+        }
+
         if self.take(&TokenKind::Function) {
             let name = self.identifier()?;
             self.expect(&TokenKind::LeftParen, "متوقع '(' بعد اسم الدالة")?;

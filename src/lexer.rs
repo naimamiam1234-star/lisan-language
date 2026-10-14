@@ -1,6 +1,6 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
-    Let, Print, If, Else, While, ForEach, In, Function, Return, True, False, Null,
+    Let, Print, If, Else, While, ForEach, In, Function, Return, Import, True, False, Null,
     Identifier(String), Number(f64), String(String),
     LeftParen, RightParen, LeftBrace, RightBrace, LeftBracket, RightBracket, Comma, Semicolon,
     Plus, Minus, Star, Slash, Percent,
@@ -136,6 +136,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                     "لكل" => TokenKind::ForEach,
                     "في" => TokenKind::In,
                     "دالة" => TokenKind::Function,
+                    "استورد" => TokenKind::Import,
                     "أرجع" | "ارجع" => TokenKind::Return,
                     "صحيح" => TokenKind::True,
                     "خطأ" | "خطا" => TokenKind::False,

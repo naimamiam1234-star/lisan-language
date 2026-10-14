@@ -21,3 +21,5 @@ jobs:
           cargo run -- examples/functions.lsn
           cargo run -- examples/lists.lsn
           cargo run -- examples/text.lsn
+          cargo run -- examples/modules/main.lsn
+          cargo run -- --check examples/modules/main.lsn

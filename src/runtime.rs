@@ -62,6 +62,16 @@ impl Interpreter {
     pub fn run_source(&mut self, source: &str) -> Result<Vec<String>, String> {
         let tokens = crate::lexer::tokenize(source)?;
         let statements = crate::parser::parse(tokens)?;
+        self.run_program(&statements)
+    }
+
+    /// Run a UTF-8 .lsn file and its imports relative to each source file.
+    pub fn run_file(&mut self, path: impl AsRef<std::path::Path>) -> Result<Vec<String>, String> {
+        let statements = crate::modules::load_file(path.as_ref())?;
+        self.run_program(&statements)
+    }
+
+    fn run_program(&mut self, statements: &[Stmt]) -> Result<Vec<String>, String> {
         self.output.clear();
         self.steps = 0;
         if self.execute_statements(&statements, false)?.is_some() {
@@ -92,6 +102,9 @@ impl Interpreter {
     fn execute(&mut self, stmt: &Stmt) -> Result<Option<Value>, String> {
         self.tick()?;
         match stmt {
+            Stmt::Import(_) => {
+                return Err("استورد تعمل فقط عند تشغيل ملف .lsn وليس من النص التفاعلي".into());
+            }
             Stmt::Let(name, expr) => {
                 let value = self.eval(expr)?;
                 let scope = self.scopes.last_mut().expect("scope exists");

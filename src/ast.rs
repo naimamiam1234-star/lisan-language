@@ -30,6 +30,7 @@ pub struct Function {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
+    Import(String),
     Let(String, Expr),
     Print(Expr),
     Expr(Expr),
