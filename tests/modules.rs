@@ -15,7 +15,7 @@ fn workspace() -> PathBuf {
 #[test]
 fn imports_functions_from_another_file() {
     let file = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/modules/main.lsn");
-    assert_eq!(run_file(file).unwrap(), ["مربع ٧ = 49"]);
+    assert_eq!(run_file(file).unwrap(), ["مربع 7 = 49"]);
     check_file(file).unwrap();
 }
 

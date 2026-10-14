@@ -2,7 +2,7 @@
 pub enum TokenKind {
     Let, Print, If, Else, While, ForEach, In, Function, Return, Import, True, False, Null,
     Identifier(String), Number(f64), String(String),
-    LeftParen, RightParen, LeftBrace, RightBrace, LeftBracket, RightBracket, Comma, Semicolon,
+    LeftParen, RightParen, LeftBrace, RightBrace, LeftBracket, RightBracket, Comma, Colon, Semicolon,
     Plus, Minus, Star, Slash, Percent,
     Equal, EqualEqual, Bang, BangEqual,
     Less, LessEqual, Greater, GreaterEqual, AndAnd, OrOr, Eof,
@@ -54,6 +54,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
             '[' => TokenKind::LeftBracket,
             ']' => TokenKind::RightBracket,
             ',' | '،' => TokenKind::Comma,
+            ':' => TokenKind::Colon,
             ';' | '؛' => TokenKind::Semicolon,
             '+' => TokenKind::Plus,
             '-' => TokenKind::Minus,
@@ -98,21 +99,24 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                 }
                 TokenKind::String(s)
             }
-            _ if is_digit(c) => {
+            _ if matches!(c, '٠'..='٩' | '۰'..='۹') => {
+                return Err(format!("السطر {}، العمود {}: استخدم الأرقام اللاتينية 0-9 فقط", line, column));
+            }
+            _ if c.is_ascii_digit() => {
                 let mut num = String::new();
-                while i < chars.len() && is_digit(chars[i]) {
-                    num.push(to_ascii_digit(chars[i]).unwrap());
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    num.push(chars[i]);
                     i += 1;
                     column += 1;
                 }
-                if (chars.get(i) == Some(&'.') || chars.get(i) == Some(&'٫'))
-                    && chars.get(i + 1).copied().map(is_digit).unwrap_or(false)
+                if chars.get(i) == Some(&'.')
+                    && chars.get(i + 1).copied().map(|x| x.is_ascii_digit()).unwrap_or(false)
                 {
                     num.push('.');
                     i += 1;
                     column += 1;
-                    while i < chars.len() && is_digit(chars[i]) {
-                        num.push(to_ascii_digit(chars[i]).unwrap());
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        num.push(chars[i]);
                         i += 1;
                         column += 1;
                     }
@@ -128,11 +132,11 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                 }
                 let word: String = chars[start..=i].iter().collect();
                 match word.as_str() {
-                    "دع" => TokenKind::Let,
+                    "دع" | "ليكن" | "متغير" => TokenKind::Let,
                     "اطبع" => TokenKind::Print,
                     "إذا" | "اذا" => TokenKind::If,
                     "وإلا" | "والا" => TokenKind::Else,
-                    "طالما" => TokenKind::While,
+                    "طالما" | "بينما" => TokenKind::While,
                     "لكل" => TokenKind::ForEach,
                     "في" => TokenKind::In,
                     "دالة" => TokenKind::Function,
@@ -157,14 +161,5 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
     Ok(result)
 }
 
-fn to_ascii_digit(c: char) -> Option<char> {
-    match c {
-        '0'..='9' => Some(c),
-        '٠'..='٩' => Some((b'0' + (c as u32 - '٠' as u32) as u8) as char),
-        '۰'..='۹' => Some((b'0' + (c as u32 - '۰' as u32) as u8) as char),
-        _ => None,
-    }
-}
-fn is_digit(c: char) -> bool { to_ascii_digit(c).is_some() }
 fn is_ident_start(c: char) -> bool { c.is_alphabetic() || c == '_' }
 fn is_ident_continue(c: char) -> bool { c.is_alphanumeric() || c == '_' }

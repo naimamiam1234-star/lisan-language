@@ -1,0 +1,13 @@
+{
+  "scopeName": "source.lisan",
+  "name": "Lisan",
+  "patterns": [
+    {"name":"comment.line.number-sign.lisan","match":"#.*$"},
+    {"name":"comment.line.double-slash.lisan","match":"//.*$"},
+    {"name":"string.quoted.double.lisan","begin":"\"","end":"\"","patterns":[{"name":"constant.character.escape.lisan","match":"\\\\[ntr\"\\]"}]},
+    {"name":"keyword.control.lisan","match":"\\b(دع|ليكن|متغير|إذا|اذا|وإلا|والا|طالما|بينما|لكل|في|دالة|استورد|أرجع|ارجع)\\b"},
+    {"name":"constant.language.lisan","match":"\\b(صحيح|خطأ|خطا|لاشيء)\\b"},
+    {"name":"constant.numeric.lisan","match":"\\b[0-9]+(\\.[0-9]+)?\\b"},
+    {"name":"support.function.lisan","match":"\\b(اطبع|طول|نوع|نص|عدد|أضف|اضف|مدى|يحتوي|مفاتيح|قيم|احذف|قسّم|قسم|ادمج|استبدل|اقتطع|نظّف|نظف|مطلق|جذر|قرّب|قرب|أعلى|أدنى|اقرأ_ملف|اكتب_ملف)\\b"}
+  ]
+}

@@ -5,6 +5,7 @@ pub enum Expr {
     Bool(bool),
     Null,
     List(Vec<Expr>),
+    Map(Vec<(String, Expr)>),
     Variable(String),
     Assign(String, Box<Expr>),
     AssignIndex(String, Box<Expr>, Box<Expr>),

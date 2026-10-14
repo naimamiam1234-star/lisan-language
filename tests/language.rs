@@ -14,7 +14,7 @@ fn loops_and_scopes() {
 
 #[test]
 fn recursive_functions() {
-    assert_eq!(run(include_str!("../examples/functions.lsn")).unwrap(), ["مضروب ٥ = 120"]);
+    assert_eq!(run(include_str!("../examples/functions.lsn")).unwrap(), ["مضروب 5 = 120"]);
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn precedence_and_comparisons() {
 
 #[test]
 fn accepts_both_semicolons_and_comma_styles() {
-    assert_eq!(run("دالة جمع(س، ص) { أرجع س + ص; } اطبع(جمع(٣، ٤));").unwrap(), ["7"]);
+    assert_eq!(run("دالة جمع(س، ص) { أرجع س + ص; } اطبع(جمع(3، 4));").unwrap(), ["7"]);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn invalid_condition_type_is_error() {
 #[test]
 fn lists_and_for_each_example() {
     assert_eq!(run(include_str!("../examples/lists.lsn")).unwrap(),
-        ["المجموع: 90", "عدد القياسات: 4", "القياس الثاني: 22", "هل يوجد ٢٦؟ صحيح"]);
+        ["المجموع: 90", "عدد القياسات: 4", "القياس الثاني: 22", "هل يوجد 26؟ صحيح"]);
 }
 
 #[test]
@@ -92,29 +92,29 @@ fn unicode_text_and_conversion_example() {
 
 #[test]
 fn empty_lists_and_concat() {
-    assert_eq!(run("دع أ = []؛ دع ب = [١، ٢] + [٣]؛ اطبع(طول(أ))؛ اطبع(ب[٢])؛").unwrap(),
+    assert_eq!(run("دع أ = []؛ دع ب = [1، 2] + [3]؛ اطبع(طول(أ))؛ اطبع(ب[2])؛").unwrap(),
         ["0", "3"]);
 }
 
 #[test]
 fn nested_indexing() {
-    assert_eq!(run("دع س = [[١، ٢]، [٣، ٤]]؛ اطبع(س[١][٠])؛").unwrap(), ["3"]);
+    assert_eq!(run("دع س = [[1، 2]، [3، 4]]؛ اطبع(س[1][0])؛").unwrap(), ["3"]);
 }
 
 #[test]
 fn list_index_assignment() {
-    assert_eq!(run("دع س = [١، ٢]؛ س[٠] = ٩؛ اطبع(س[٠])؛").unwrap(), ["9"]);
+    assert_eq!(run("دع س = [1، 2]؛ س[0] = 9؛ اطبع(س[0])؛").unwrap(), ["9"]);
 }
 
 #[test]
 fn for_each_has_own_iteration_scope() {
-    assert_eq!(run("دع س = ١٠؛ لكل (س في [١، ٢]) { اطبع(س)؛ } اطبع(س)؛").unwrap(),
+    assert_eq!(run("دع س = 10؛ لكل (س في [1، 2]) { اطبع(س)؛ } اطبع(س)؛").unwrap(),
         ["1", "2", "10"]);
 }
 
 #[test]
 fn for_each_return_from_function() {
-    let source = "دالة اول_كبير(قائمة) { لكل (س في قائمة) { إذا (س > ٥) { أرجع س؛ } } أرجع لاشيء؛ } اطبع(اول_كبير([٢، ٧، ٩]))؛";
+    let source = "دالة اول_كبير(قائمة) { لكل (س في قائمة) { إذا (س > 5) { أرجع س؛ } } أرجع لاشيء؛ } اطبع(اول_كبير([2، 7، 9]))؛";
     assert_eq!(run(source).unwrap(), ["7"]);
 }
 
@@ -126,12 +126,12 @@ fn arabic_logic_words_and_short_circuit() {
 
 #[test]
 fn range_builtin() {
-    assert_eq!(run("لكل (س في مدى(٢، ٥)) { اطبع(س)؛ }").unwrap(), ["2", "3", "4"]);
+    assert_eq!(run("لكل (س في مدى(2، 5)) { اطبع(س)؛ }").unwrap(), ["2", "3", "4"]);
 }
 
 #[test]
 fn list_equality_and_type_name() {
-    assert_eq!(run("اطبع([١، ٢] == [١، ٢])؛ اطبع(نوع([١]))؛ اطبع(نوع(لاشيء))؛").unwrap(),
+    assert_eq!(run("اطبع([1، 2] == [1، 2])؛ اطبع(نوع([1]))؛ اطبع(نوع(لاشيء))؛").unwrap(),
         ["صحيح", "قائمة", "لاشيء"]);
 }
 
@@ -142,41 +142,42 @@ fn builtin_argument_count_error() {
 
 #[test]
 fn invalid_index_error() {
-    assert!(run("اطبع([١][٢])؛").unwrap_err().contains("خارج حدود"));
-    assert!(run("اطبع([١][-١])؛").unwrap_err().contains("غير سالب"));
-    assert!(run("اطبع([١][٠٫٥])؛").unwrap_err().contains("غير سالب"));
+    assert!(run("اطبع([1][2])؛").unwrap_err().contains("خارج حدود"));
+    assert!(run("اطبع([1][-1])؛").unwrap_err().contains("غير سالب"));
+    assert!(run("اطبع([1][0.5])؛").unwrap_err().contains("غير سالب"));
 }
 
 #[test]
 fn cannot_assign_to_string_index() {
-    assert!(run("دع س = \"لسان\"؛ س[٠] = \"x\"؛").unwrap_err().contains("قائمة"));
+    assert!(run("دع س = \"لسان\"؛ س[0] = \"x\"؛").unwrap_err().contains("قائمة"));
 }
 
 #[test]
 fn range_size_is_bounded() {
-    assert!(run("دع س = مدى(١٠٠٠٠١)؛").unwrap_err().contains("الحد الأقصى"));
+    assert!(run("دع س = مدى(100001)؛").unwrap_err().contains("الحد الأقصى"));
 }
 
 #[test]
 fn checks_builtin_input_types() {
-    assert!(run("اطبع(طول(٥))؛").unwrap_err().contains("قائمة أو نص"));
+    assert!(run("اطبع(طول(5))؛").unwrap_err().contains("قائمة أو نص"));
     assert!(run("اطبع(عدد(صحيح))؛").unwrap_err().contains("رقمًا"));
 }
 
 #[test]
-fn unicode_arabic_decimal_parsing() {
-    assert_eq!(run("اطبع(عدد(\"۱۲٫۵\") + ٠٫٥)؛").unwrap(), ["13"]);
+fn latin_only_number_conversion() {
+    assert_eq!(run("اطبع(عدد(\"12.5\") + 0.5)؛").unwrap(), ["13"]);
+    assert!(run("اطبع(عدد(\"١٢\"))؛").unwrap_err().contains("اللاتينية"));
 }
 
 #[test]
 fn list_reassignment_persists_between_repl_lines() {
     let mut interpreter = Interpreter::default();
-    interpreter.run_source("دع س = [١]؛").unwrap();
-    interpreter.run_source("س = أضف(س، ٢)؛").unwrap();
-    assert_eq!(interpreter.run_source("اطبع(س[١])؛").unwrap(), ["2"]);
+    interpreter.run_source("دع س = [1]؛").unwrap();
+    interpreter.run_source("س = أضف(س، 2)؛").unwrap();
+    assert_eq!(interpreter.run_source("اطبع(س[1])؛").unwrap(), ["2"]);
 }
 
 #[test]
 fn malformed_foreach_reports_syntax_error() {
-    assert!(run("لكل (س من [١]) { اطبع(س)؛ }").unwrap_err().contains("متوقع 'في'"));
+    assert!(run("لكل (س من [1]) { اطبع(س)؛ }").unwrap_err().contains("متوقع 'في'"));
 }

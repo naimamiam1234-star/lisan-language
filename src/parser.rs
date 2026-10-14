@@ -130,7 +130,7 @@ impl Parser {
                 Expr::Variable(name) => Ok(Expr::Assign(name, Box::new(rhs))),
                 Expr::Index(target, index) => match *target {
                     Expr::Variable(name) => Ok(Expr::AssignIndex(name, index, Box::new(rhs))),
-                    _ => Err(self.error("إسناد عناصر القائمة يتطلب متغيرًا مباشرًا")),
+                    _ => Err(self.error("إسناد عناصر القائمة أو القاموس يتطلب متغيرًا مباشرًا")),
                 },
                 _ => Err(self.error("الطرف الأيسر للإسناد يجب أن يكون اسم متغير")),
             }
@@ -242,6 +242,24 @@ impl Parser {
                 }
                 self.expect(&TokenKind::RightBracket, "متوقع ']' لإنهاء القائمة")?;
                 Ok(Expr::List(items))
+            }
+            TokenKind::LeftBrace => {
+                self.cursor += 1;
+                let mut pairs = Vec::new();
+                if !self.is(&TokenKind::RightBrace) {
+                    loop {
+                        let key = match self.current().kind.clone() {
+                            TokenKind::String(key) => { self.cursor += 1; key },
+                            _ => return Err(self.error("يجب أن يكون مفتاح القاموس نصًا بين علامتي اقتباس")),
+                        };
+                        self.expect(&TokenKind::Colon, "متوقع ':' بعد مفتاح القاموس")?;
+                        let value = self.expression()?;
+                        pairs.push((key, value));
+                        if !self.take(&TokenKind::Comma) { break; }
+                    }
+                }
+                self.expect(&TokenKind::RightBrace, "متوقع '}' لإغلاق القاموس")?;
+                Ok(Expr::Map(pairs))
             }
             TokenKind::Identifier(s) => { self.cursor += 1; Ok(Expr::Variable(s)) }
             TokenKind::LeftParen => {

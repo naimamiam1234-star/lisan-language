@@ -18,6 +18,10 @@ jobs:
       - name: Run Arabic samples
         run: |
           cargo run -- examples/hello.lsn
+          cargo run -- examples/dictionary.lsn
+          cargo run -- examples/standard_library.lsn
+          cargo run -- --tokens examples/dictionary.lsn
+          cargo run -- --ast examples/dictionary.lsn
           cargo run -- examples/functions.lsn
           cargo run -- examples/lists.lsn
           cargo run -- examples/text.lsn

@@ -5,11 +5,30 @@ use std::io::{self, Write};
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.len() == 1 && (args[0] == "-h" || args[0] == "--help") {
-        println!("لسان 0.3.0 | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn\n  lisan --check ملف.lsn  لفحص قواعد الملف واستيراداته\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 البيئة التفاعلية");
+        println!("لسان 0.4.0 | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn\n  lisan --check ملف.lsn  لفحص قواعد الملف واستيراداته\n  lisan --tokens ملف.lsn  عرض الرموز\n  lisan --ast ملف.lsn  عرض شجرة بناء التعليمات\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 البيئة التفاعلية");
         return;
     }
     if args.len() == 1 && (args[0] == "-V" || args[0] == "--version") {
-        println!("لسان 0.3.0");
+        println!("لسان 0.4.0");
+        return;
+    }
+    if args.len() == 2 && (args[0] == "--tokens" || args[0] == "--ast") {
+        let source = match std::fs::read_to_string(&args[1]) {
+            Ok(text) => text,
+            Err(err) => { eprintln!("تعذّرت قراءة الملف: {}", err); std::process::exit(1); }
+        };
+        let tokens = match lisan::lexer::tokenize(&source) {
+            Ok(tokens) => tokens,
+            Err(err) => { eprintln!("خطأ: {}", err); std::process::exit(1); }
+        };
+        if args[0] == "--tokens" {
+            for token in tokens { println!("{}:{} {:?}", token.line, token.column, token.kind); }
+        } else {
+            match lisan::parser::parse(tokens) {
+                Ok(ast) => println!("{:#?}", ast),
+                Err(err) => { eprintln!("خطأ: {}", err); std::process::exit(1); }
+            }
+        }
         return;
     }
     if args.len() == 2 && args[0] == "--check" {
@@ -34,7 +53,7 @@ fn main() {
         eprintln!("وسائط غير صحيحة. اكتب lisan --help");
         std::process::exit(2);
     }
-    println!("لسان 0.3.0 | اكتب خروج لإنهاء الجلسة");
+    println!("لسان 0.4.0 | اكتب خروج لإنهاء الجلسة");
     let mut interpreter = Interpreter::default();
     loop {
         print!("لسان> ");

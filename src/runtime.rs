@@ -13,6 +13,7 @@ pub enum Value {
     Bool(bool),
     Null,
     List(Vec<Value>),
+    Map(Vec<(String, Value)>),
 }
 
 impl fmt::Display for Value {
@@ -23,6 +24,18 @@ impl fmt::Display for Value {
             Value::Bool(true) => write!(f, "صحيح"),
             Value::Bool(false) => write!(f, "خطأ"),
             Value::Null => write!(f, "لاشيء"),
+            Value::Map(pairs) => {
+                write!(f, "{{")?;
+                for (i, (key, value)) in pairs.iter().enumerate() {
+                    if i > 0 { write!(f, "، ")?; }
+                    write!(f, "{:?}: ", key)?;
+                    match value {
+                        Value::Text(text) => write!(f, "{:?}", text)?,
+                        other => write!(f, "{}", other)?,
+                    }
+                }
+                write!(f, "}}")
+            }
             Value::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
@@ -180,6 +193,18 @@ impl Interpreter {
                 for item in items { values.push(self.eval(item)?); }
                 Ok(Value::List(values))
             }
+            Expr::Map(pairs) => {
+                if pairs.len() > MAX_LIST_SIZE { return Err("القاموس تجاوز الحد الأقصى".into()); }
+                let mut result: Vec<(String, Value)> = Vec::new();
+                for (key, item) in pairs {
+                    if result.iter().any(|(existing, _)| existing == key) {
+                        return Err(format!("مفتاح مكرر في القاموس: '{}'", key));
+                    }
+                    let value = self.eval(item)?;
+                    result.push((key.clone(), value));
+                }
+                Ok(Value::Map(result))
+            }
             Expr::Variable(name) => self.get_variable(name),
             Expr::Assign(name, expr) => {
                 let value = self.eval(expr)?;
@@ -193,23 +218,34 @@ impl Interpreter {
             }
             Expr::Index(target, index) => {
                 let value = self.eval(target)?;
-                let idx = checked_index(self.eval(index)?)?;
+                let key = self.eval(index)?;
                 match value {
-                    Value::List(items) => items.get(idx).cloned()
-                        .ok_or_else(|| format!("الفهرس {} خارج حدود القائمة", idx)),
-                    Value::Text(text) => text.chars().nth(idx)
-                        .map(|c| Value::Text(c.to_string()))
-                        .ok_or_else(|| format!("الفهرس {} خارج حدود النص", idx)),
-                    _ => Err("الفهرسة تتطلب قائمة أو نصًا".into()),
+                    Value::List(items) => {
+                        let idx = checked_index(key)?;
+                        items.get(idx).cloned().ok_or_else(|| format!("الفهرس {} خارج حدود القائمة", idx))
+                    }
+                    Value::Text(text) => {
+                        let idx = checked_index(key)?;
+                        text.chars().nth(idx).map(|c| Value::Text(c.to_string()))
+                            .ok_or_else(|| format!("الفهرس {} خارج حدود النص", idx))
+                    }
+                    Value::Map(items) => {
+                        let key = checked_key(key)?;
+                        items.iter().find(|(stored, _)| stored == &key)
+                            .map(|(_, value)| value.clone())
+                            .ok_or_else(|| format!("مفتاح غير موجود في القاموس: '{}'", key))
+                    }
+                    _ => Err("الفهرسة تتطلب قائمة أو نصًا أو قاموسًا".into()),
                 }
             }
             Expr::AssignIndex(name, index, expr) => {
-                let idx = checked_index(self.eval(index)?)?;
+                let key = self.eval(index)?;
                 let value = self.eval(expr)?;
                 for scope in self.scopes.iter_mut().rev() {
                     if let Some(target) = scope.get_mut(name) {
                         return match target {
                             Value::List(items) => {
+                                let idx = checked_index(key)?;
                                 if idx >= items.len() {
                                     Err(format!("الفهرس {} خارج حدود القائمة", idx))
                                 } else {
@@ -217,7 +253,17 @@ impl Interpreter {
                                     Ok(value)
                                 }
                             }
-                            _ => Err("إسناد عنصر يتطلب متغير قائمة".into()),
+                            Value::Map(items) => {
+                                let key = checked_key(key)?;
+                                if let Some((_, existing)) = items.iter_mut().find(|(name, _)| name == &key) {
+                                    *existing = value.clone();
+                                } else {
+                                    if items.len() >= MAX_LIST_SIZE { return Err("القاموس تجاوز الحد الأقصى".into()); }
+                                    items.push((key, value.clone()));
+                                }
+                                Ok(value)
+                            }
+                            _ => Err("إسناد عنصر يتطلب متغير قائمة أو قاموس".into()),
                         };
                     }
                 }
@@ -327,8 +373,19 @@ fn checked_index(index: Value) -> Result<usize, String> {
     }
 }
 
+fn checked_key(key: Value) -> Result<String, String> {
+    match key {
+        Value::Text(s) => Ok(s),
+        _ => Err("مفتاح القاموس يجب أن يكون نصًا".into()),
+    }
+}
+
 fn is_builtin(name: &str) -> bool {
-    matches!(name, "طول" | "نوع" | "نص" | "عدد" | "أضف" | "اضف" | "مدى" | "يحتوي")
+    matches!(name,
+        "طول" | "نوع" | "نص" | "عدد" | "أضف" | "اضف" | "مدى" | "يحتوي" |
+        "مفاتيح" | "قيم" | "احذف" | "قسّم" | "قسم" | "ادمج" | "استبدل" |
+        "اقتطع" | "نظّف" | "نظف" | "مطلق" | "جذر" | "قرّب" | "قرب" |
+        "أدنى" | "ادنى" | "أعلى" | "اعلى" | "اقرأ_ملف" | "اكتب_ملف")
 }
 
 fn require_args(name: &str, values: &[Value], count: usize) -> Result<(), String> {
@@ -336,20 +393,13 @@ fn require_args(name: &str, values: &[Value], count: usize) -> Result<(), String
     else { Err(format!("الدالة '{}' تتوقع {} معاملات، استلمت {}", name, count, values.len())) }
 }
 
-fn parse_arabic_number(source: &str) -> Result<f64, String> {
-    let mut output = String::new();
-    for c in source.trim().chars() {
-        let c = match c {
-            '٠'..='٩' => (b'0' + (c as u32 - '٠' as u32) as u8) as char,
-            '۰'..='۹' => (b'0' + (c as u32 - '۰' as u32) as u8) as char,
-            '٫' => '.',
-            c => c,
-        };
-        output.push(c);
+fn parse_latin_number(source: &str) -> Result<f64, String> {
+    let text = source.trim();
+    if text.chars().any(|c| matches!(c, '٠'..='٩' | '۰'..='۹' | '٫')) {
+        return Err("استخدم الأرقام اللاتينية 0-9 والنقطة العشرية '.' فقط".into());
     }
-    let number: f64 = output.parse().map_err(|_| "لا يمكن تحويل النص إلى رقم".to_string())?;
-    if number.is_finite() { Ok(number) }
-    else { Err("الرقم خارج النطاق المسموح".into()) }
+    let number: f64 = text.parse().map_err(|_| "لا يمكن تحويل النص إلى رقم".to_string())?;
+    if number.is_finite() { Ok(number) } else { Err("الرقم خارج النطاق المسموح".into()) }
 }
 
 fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
@@ -359,6 +409,7 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
             match &args[0] {
                 Value::List(items) => Ok(Value::Number(items.len() as f64)),
                 Value::Text(text) => Ok(Value::Number(text.chars().count() as f64)),
+                Value::Map(items) => Ok(Value::Number(items.len() as f64)),
                 _ => Err("طول يقبل قائمة أو نصًا فقط".into()),
             }
         }
@@ -370,6 +421,7 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
                 Value::Bool(_) => "منطقي",
                 Value::Null => "لاشيء",
                 Value::List(_) => "قائمة",
+                Value::Map(_) => "قاموس",
             };
             Ok(Value::Text(kind.into()))
         }
@@ -381,7 +433,7 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
             require_args(name, &args, 1)?;
             match &args[0] {
                 Value::Number(n) => Ok(Value::Number(*n)),
-                Value::Text(s) => Ok(Value::Number(parse_arabic_number(s)?)),
+                Value::Text(s) => Ok(Value::Number(parse_latin_number(s)?)),
                 _ => Err("عدد يقبل رقمًا أو نصًا رقميًا".into()),
             }
         }
@@ -400,7 +452,139 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
             match (&args[0], &args[1]) {
                 (Value::List(items), sought) => Ok(Value::Bool(items.contains(sought))),
                 (Value::Text(text), Value::Text(sought)) => Ok(Value::Bool(text.contains(sought))),
+                (Value::Map(pairs), Value::Text(key)) => Ok(Value::Bool(pairs.iter().any(|(k, _)| k == key))),
                 _ => Err("يحتوي تتطلب قائمة أو نصين".into()),
+            }
+        }
+        "مفاتيح" => {
+            require_args(name, &args, 1)?;
+            match &args[0] {
+                Value::Map(pairs) => Ok(Value::List(pairs.iter().map(|(key, _)| Value::Text(key.clone())).collect())),
+                _ => Err("مفاتيح تتطلب قاموسًا".into()),
+            }
+        }
+        "قيم" => {
+            require_args(name, &args, 1)?;
+            match &args[0] {
+                Value::Map(pairs) => Ok(Value::List(pairs.iter().map(|(_, val)| val.clone()).collect())),
+                _ => Err("قيم تتطلب قاموسًا".into()),
+            }
+        }
+        "احذف" => {
+            require_args(name, &args, 2)?;
+            match (&args[0], &args[1]) {
+                (Value::Map(pairs), Value::Text(key)) => {
+                    let mut new = pairs.clone();
+                    new.retain(|(name, _)| name != key);
+                    Ok(Value::Map(new))
+                }
+                (Value::List(items), Value::Number(_)) => {
+                    let index = checked_index(args[1].clone())?;
+                    if index >= items.len() { return Err("الفهرس خارج حدود القائمة".into()); }
+                    let mut new = items.clone();
+                    new.remove(index);
+                    Ok(Value::List(new))
+                }
+                _ => Err("احذف تتطلب قاموسًا ومفتاحًا نصيًا، أو قائمة وفهرسًا".into()),
+            }
+        }
+        "قسّم" | "قسم" => {
+            require_args(name, &args, 2)?;
+            match (&args[0], &args[1]) {
+                (Value::Text(text), Value::Text(sep)) => {
+                    let items: Vec<_> = text.split(sep).map(|v| Value::Text(v.to_owned())).collect();
+                    if items.len() > MAX_LIST_SIZE { return Err("القائمة تجاوزت الحد الأقصى".into()); }
+                    Ok(Value::List(items))
+                }
+                _ => Err("قسّم تتطلب نصين".into()),
+            }
+        }
+        "ادمج" => {
+            require_args(name, &args, 2)?;
+            match (&args[0], &args[1]) {
+                (Value::List(items), Value::Text(sep)) => {
+                    let strings: Result<Vec<&str>, String> = items.iter().map(|x| match x {
+                        Value::Text(v) => Ok(v.as_str()),
+                        _ => Err("ادمج تتطلب قائمة من النصوص".into()),
+                    }).collect();
+                    Ok(Value::Text(strings?.join(sep)))
+                }
+                _ => Err("ادمج تتطلب قائمة ونصًا للفاصل".into()),
+            }
+        }
+        "استبدل" => {
+            require_args(name, &args, 3)?;
+            match (&args[0], &args[1], &args[2]) {
+                (Value::Text(source), Value::Text(from), Value::Text(to)) => {
+                    if from.is_empty() { return Err("لا يجوز أن يكون النص المستبدَل فارغًا".into()); }
+                    Ok(Value::Text(source.replace(from, to)))
+                }
+                _ => Err("استبدل تتطلب ثلاثة نصوص".into()),
+            }
+        }
+        "اقتطع" => {
+            require_args(name, &args, 3)?;
+            match &args[0] {
+                Value::Text(source) => {
+                    let first = checked_index(args[1].clone())?;
+                    let end = checked_index(args[2].clone())?;
+                    let chars: Vec<char> = source.chars().collect();
+                    if first > end || end > chars.len() { return Err("حدود الاقتطاع غير صحيحة".into()); }
+                    Ok(Value::Text(chars[first..end].iter().collect()))
+                }
+                _ => Err("اقتطع تتطلب نصًا وفهرسين".into()),
+            }
+        }
+        "نظّف" | "نظف" => {
+            require_args(name, &args, 1)?;
+            match &args[0] {
+                Value::Text(text) => Ok(Value::Text(text.trim().to_string())),
+                _ => Err("نظّف تتطلب نصًا".into()),
+            }
+        }
+        "مطلق" | "جذر" | "قرّب" | "قرب" => {
+            require_args(name, &args, 1)?;
+            match args[0] {
+                Value::Number(num) => {
+                    let result = match name {
+                        "مطلق" => num.abs(),
+                        "جذر" if num >= 0.0 => num.sqrt(),
+                        "جذر" => return Err("الجذر التربيعي لعدد سالب غير مدعوم".into()),
+                        _ => num.round(),
+                    };
+                    if !result.is_finite() { return Err("الناتج خارج نطاق الأعداد".into()); }
+                    Ok(Value::Number(result))
+                }
+                _ => Err("تتطلب الدالة عددًا".into()),
+            }
+        }
+        "أدنى" | "ادنى" | "أعلى" | "اعلى" => {
+            require_args(name, &args, 2)?;
+            match (&args[0], &args[1]) {
+                (Value::Number(a), Value::Number(b)) => Ok(Value::Number(if name == "أدنى" || name == "ادنى" { a.min(*b) } else { a.max(*b) })),
+                _ => Err("المقارنة تتطلب رقمين".into()),
+            }
+        }
+        "اقرأ_ملف" => {
+            require_args(name, &args, 1)?;
+            match &args[0] {
+                Value::Text(path) => {
+                    let metadata = std::fs::metadata(path).map_err(|e| format!("تعذّرت قراءة الملف: {}", e))?;
+                    if metadata.len() > 2_000_000 { return Err("حجم الملف يتجاوز 2 ميغابايت".into()); }
+                    std::fs::read_to_string(path).map(Value::Text).map_err(|e| format!("تعذّرت قراءة النص UTF-8: {}", e))
+                }
+                _ => Err("اقرأ_ملف تتطلب مسارًا نصيًا".into()),
+            }
+        }
+        "اكتب_ملف" => {
+            require_args(name, &args, 2)?;
+            match (&args[0], &args[1]) {
+                (Value::Text(path), Value::Text(contents)) => {
+                    if contents.len() > 2_000_000 { return Err("حجم النص يتجاوز 2 ميغابايت".into()); }
+                    std::fs::write(path, contents).map_err(|e| format!("تعذّرت كتابة الملف: {}", e))?;
+                    Ok(Value::Bool(true))
+                }
+                _ => Err("اكتب_ملف تتطلب مسارًا ونصًا".into()),
             }
         }
         "مدى" => {
