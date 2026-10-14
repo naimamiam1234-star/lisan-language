@@ -1,0 +1,14 @@
+[package]
+name = "lisan"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "لسان: نواة لغة برمجة عربية مكتوبة بلغة Rust"
+
+[lib]
+name = "lisan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lisan"
+path = "src/main.rs"
