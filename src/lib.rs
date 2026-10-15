@@ -2,6 +2,7 @@ pub mod ast;
 pub mod bundle;
 pub mod lexer;
 pub mod modules;
+pub mod native;
 pub mod parser;
 pub mod runtime;
 

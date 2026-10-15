@@ -1,3 +1,18 @@
+# لسان — تطوير مترجم أصلي (Native Compiler)
+
+**جديد:** تحويل ملفات لسان العربية إلى **برامج آلة أصلية** بلا مفسّر مُضمّن، بواسطة LLVM IR وClang. هذا مسار ترجمة مسبقة (AOT)، وما زال يدعم جزءًا من اللغة، لا كل مكتبات المفسّر القديمة.
+
+```bash
+cargo run -- --native examples/native.lsn --output native-program
+# أو افتراضيًا: cargo run -- examples/native.lsn
+./native-program
+cargo run -- --emit-llvm examples/native.lsn --output native.ll
+```
+
+اقرأ [دليل المترجم الأصلي](docs/NATIVE-COMPILER.md) للاطلاع على الميزات والقيود؛ لا تزال `--build` القديمة تجمع المفسّر لأغراض التوافق ولا تمثّل الترجمة الأصلية.
+
+---
+
 <div dir="rtl">
 
 # لسان LISAN — نواة موحّدة 0.6.0

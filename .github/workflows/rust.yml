@@ -13,19 +13,37 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run unit and integration tests
         run: cargo test --all-targets
+      - name: Compile and execute real native Lisan binary (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          command -v clang
+          cargo run -- --emit-llvm examples/native.lsn --output native.ll
+          grep -F 'define i32 @main' native.ll
+          cargo run -- --native examples/native.lsn --output native-sample
+          printf '0\n1\n9\n16\nانتهى\n' > expected-native.txt
+          ./native-sample > actual-native.txt
+          diff -u expected-native.txt actual-native.txt
+          file native-sample
+      - name: Upload generated native Lisan sample (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisan-genuine-native-Linux
+          path: native-sample
       - name: Compile optimized interpreter
         run: cargo build --release
       - name: Run Arabic samples
         run: |
-          cargo run -- examples/hello.lsn
-          cargo run -- examples/dictionary.lsn
-          cargo run -- examples/standard_library.lsn
+          cargo run -- --interpret examples/hello.lsn
+          cargo run -- --interpret examples/dictionary.lsn
+          cargo run -- --interpret examples/standard_library.lsn
           cargo run -- --tokens examples/dictionary.lsn
           cargo run -- --ast examples/dictionary.lsn
-          cargo run -- examples/functions.lsn
-          cargo run -- examples/lists.lsn
-          cargo run -- examples/text.lsn
-          cargo run -- examples/modules/main.lsn
+          cargo run -- --interpret examples/functions.lsn
+          cargo run -- --interpret examples/lists.lsn
+          cargo run -- --interpret examples/text.lsn
+          cargo run -- --interpret examples/modules/main.lsn
           cargo run -- --check examples/modules/main.lsn
           cargo run -- --test examples/testing.lsn
       - name: Build a standalone Lisan sample (Linux/macOS)
