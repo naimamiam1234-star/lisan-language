@@ -40,6 +40,20 @@ jobs:
           cargo run -- --build examples/modules/main.lsn --output standalone-sample.exe
           $actual = & .\standalone-sample.exe
           if ($LASTEXITCODE -ne 0 -or $actual -ne 'مربع 7 = 49') { throw "Standalone sample failed: $actual" }
+      - name: Package standalone Arabic sample (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: tar -czf lisan-sample-${{ runner.os }}.tar.gz standalone-sample
+      - name: Package standalone Arabic sample (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path standalone-sample.exe -DestinationPath lisan-sample-Windows.zip
+      - name: Upload standalone Arabic application
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisan-standalone-sample-${{ runner.os }}
+          path: |
+            lisan-sample-*.tar.gz
+            lisan-sample-*.zip
+          if-no-files-found: error
       - name: Package Linux/macOS interpreter
         if: runner.os != 'Windows'
         run: tar -czf lisan-${{ runner.os }}.tar.gz -C target/release lisan

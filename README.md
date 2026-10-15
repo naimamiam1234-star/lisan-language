@@ -35,7 +35,7 @@ cargo run -- --ast examples/hello.lsn
 cargo run -- --build examples/modules/main.lsn --output app
 ```
 
-للحصول على المفسّر الجاهز: [GitHub Actions](https://github.com/naimamiam1234-star/lisan-language/actions) ثم Artifacts. الأمثلة المصدرية في `examples/`، والنحو في `docs/SYNTAX.md` وسياسة الأرقام في `docs/NUMBERS-AND-STYLE.md`.
+للحصول على المفسّر الجاهز: [GitHub Actions](https://github.com/naimamiam1234-star/lisan-language/actions) ثم Artifacts، حيث تظهر حزم المفسّر (`lisan-*`) وبرنامج عربي مستقل تجريبي (`lisan-standalone-sample-*`). الأمثلة المصدرية في `examples/`، والنحو في `docs/SYNTAX.md` وسياسة الأرقام في `docs/NUMBERS-AND-STYLE.md`.
 
 ## ما لم يكتمل بعد
 
