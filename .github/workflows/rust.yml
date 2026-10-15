@@ -35,6 +35,15 @@ jobs:
           diff -u expected-collections.out native-collections.out
           cargo run -- --native examples/native_math.lsn --output native-math
           ./native-math | grep -F 'لغة لسان 8'
+      - name: Upload native collections and mathematics samples (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisan-native-0.8-samples-Linux
+          path: |
+            native-collections
+            native-math
+          if-no-files-found: error
       - name: Upload generated native Lisan sample (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
