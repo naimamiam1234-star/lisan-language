@@ -84,7 +84,8 @@ impl Interpreter {
         self.run_program(&statements)
     }
 
-    fn run_program(&mut self, statements: &[Stmt]) -> Result<Vec<String>, String> {
+    /// Execute an already parsed, import-resolved program. Used by the bundler.
+    pub fn run_program(&mut self, statements: &[Stmt]) -> Result<Vec<String>, String> {
         self.output.clear();
         self.steps = 0;
         if self.execute_statements(&statements, false)?.is_some() {

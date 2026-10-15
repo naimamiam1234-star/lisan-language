@@ -27,6 +27,19 @@ jobs:
           cargo run -- examples/text.lsn
           cargo run -- examples/modules/main.lsn
           cargo run -- --check examples/modules/main.lsn
+      - name: Build a standalone Lisan sample (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo run -- --build examples/modules/main.lsn --output standalone-sample
+          ./standalone-sample | grep -F 'مربع 7 = 49'
+      - name: Build a standalone Lisan sample (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo run -- --build examples/modules/main.lsn --output standalone-sample.exe
+          $actual = & .\standalone-sample.exe
+          if ($LASTEXITCODE -ne 0 -or $actual -ne 'مربع 7 = 49') { throw "Standalone sample failed: $actual" }
       - name: Package Linux/macOS interpreter
         if: runner.os != 'Windows'
         run: tar -czf lisan-${{ runner.os }}.tar.gz -C target/release lisan

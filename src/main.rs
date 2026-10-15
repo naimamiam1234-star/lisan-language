@@ -5,11 +5,27 @@ use std::io::{self, Write};
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.len() == 1 && (args[0] == "-h" || args[0] == "--help") {
-        println!("لسان 0.4.0 | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn\n  lisan --check ملف.lsn  لفحص قواعد الملف واستيراداته\n  lisan --tokens ملف.lsn  عرض الرموز\n  lisan --ast ملف.lsn  عرض شجرة بناء التعليمات\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 البيئة التفاعلية");
+        println!("لسان 0.5.0 | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn\n  lisan --check ملف.lsn  لفحص قواعد الملف واستيراداته\n  lisan --build ملف.lsn [--output الناتج]  بناء برنامج مستقل باستخدام Cargo\n  lisan --tokens ملف.lsn  عرض الرموز\n  lisan --ast ملف.lsn  عرض شجرة بناء التعليمات\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 البيئة التفاعلية");
         return;
     }
     if args.len() == 1 && (args[0] == "-V" || args[0] == "--version") {
-        println!("لسان 0.4.0");
+        println!("لسان 0.5.0");
+        return;
+    }
+    if !args.is_empty() && args[0] == "--build" {
+        if args.len() != 2 && args.len() != 4 {
+            eprintln!("الاستخدام: lisan --build ملف.lsn [--output الناتج]");
+            std::process::exit(2);
+        }
+        if args.len() == 4 && args[2] != "--output" {
+            eprintln!("الاستخدام: lisan --build ملف.lsn [--output الناتج]");
+            std::process::exit(2);
+        }
+        let target = if args.len() == 4 { Some(std::path::Path::new(&args[3])) } else { None };
+        match lisan::bundle::build_executable(std::path::Path::new(&args[1]), target) {
+            Ok(path) => println!("أُنشئ البرنامج المستقل: {}", path.display()),
+            Err(err) => { eprintln!("خطأ في البناء: {}", err); std::process::exit(1); }
+        }
         return;
     }
     if args.len() == 2 && (args[0] == "--tokens" || args[0] == "--ast") {
@@ -53,7 +69,7 @@ fn main() {
         eprintln!("وسائط غير صحيحة. اكتب lisan --help");
         std::process::exit(2);
     }
-    println!("لسان 0.4.0 | اكتب خروج لإنهاء الجلسة");
+    println!("لسان 0.5.0 | اكتب خروج لإنهاء الجلسة");
     let mut interpreter = Interpreter::default();
     loop {
         print!("لسان> ");
