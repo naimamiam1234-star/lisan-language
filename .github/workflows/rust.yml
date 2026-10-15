@@ -27,6 +27,7 @@ jobs:
           cargo run -- examples/text.lsn
           cargo run -- examples/modules/main.lsn
           cargo run -- --check examples/modules/main.lsn
+          cargo run -- --test examples/testing.lsn
       - name: Build a standalone Lisan sample (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash

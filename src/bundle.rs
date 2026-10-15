@@ -23,7 +23,7 @@ fn boxed(expr: &Expr) -> String { format!("Box::new({})", emit_expr(expr)) }
 fn emit_op(op: Op) -> &'static str {
     match op {
         Op::Add => "Op::Add", Op::Subtract => "Op::Subtract", Op::Multiply => "Op::Multiply",
-        Op::Divide => "Op::Divide", Op::Modulo => "Op::Modulo", Op::Equal => "Op::Equal",
+        Op::Divide => "Op::Divide", Op::Modulo => "Op::Modulo", Op::Power => "Op::Power", Op::Equal => "Op::Equal",
         Op::NotEqual => "Op::NotEqual", Op::Less => "Op::Less", Op::LessEqual => "Op::LessEqual",
         Op::Greater => "Op::Greater", Op::GreaterEqual => "Op::GreaterEqual", Op::And => "Op::And",
         Op::Or => "Op::Or", Op::Not => "Op::Not", Op::Negate => "Op::Negate",
@@ -67,6 +67,8 @@ fn emit_stmt(stmt: &Stmt) -> String {
             Some(e) => format!("Stmt::Return(Some({}))", emit_expr(e)),
             None => "Stmt::Return(None)".into(),
         },
+        Stmt::Break => "Stmt::Break".into(),
+        Stmt::Continue => "Stmt::Continue".into(),
     }
 }
 

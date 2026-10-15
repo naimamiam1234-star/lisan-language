@@ -5,11 +5,11 @@ use std::io::{self, Write};
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.len() == 1 && (args[0] == "-h" || args[0] == "--help") {
-        println!("لسان 0.5.0 | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn\n  lisan --check ملف.lsn  لفحص قواعد الملف واستيراداته\n  lisan --build ملف.lsn [--output الناتج]  بناء برنامج مستقل باستخدام Cargo\n  lisan --tokens ملف.lsn  عرض الرموز\n  lisan --ast ملف.lsn  عرض شجرة بناء التعليمات\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 البيئة التفاعلية");
+        println!("لسان 0.6.0 | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn\n  lisan --check ملف.lsn  لفحص قواعد الملف واستيراداته\n  lisan --test ملف.lsn   تشغيل تحققات البرنامج\n  lisan --build ملف.lsn [--output الناتج]  بناء برنامج مستقل باستخدام Cargo\n  lisan --tokens ملف.lsn  عرض الرموز\n  lisan --ast ملف.lsn  عرض شجرة بناء التعليمات\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 البيئة التفاعلية");
         return;
     }
     if args.len() == 1 && (args[0] == "-V" || args[0] == "--version") {
-        println!("لسان 0.5.0");
+        println!("لسان 0.6.0");
         return;
     }
     if !args.is_empty() && args[0] == "--build" {
@@ -47,6 +47,13 @@ fn main() {
         }
         return;
     }
+    if args.len() == 2 && args[0] == "--test" {
+        match Interpreter::default().run_file(&args[1]) {
+            Ok(_) => println!("نجحت اختبارات لسان"),
+            Err(err) => { eprintln!("فشلت اختبارات لسان: {}", err); std::process::exit(1); }
+        }
+        return;
+    }
     if args.len() == 2 && args[0] == "--check" {
         match check_file(&args[1]) {
             Ok(()) => println!("نجح فحص ملفات لسان"),
@@ -69,7 +76,7 @@ fn main() {
         eprintln!("وسائط غير صحيحة. اكتب lisan --help");
         std::process::exit(2);
     }
-    println!("لسان 0.5.0 | اكتب خروج لإنهاء الجلسة");
+    println!("لسان 0.6.0 | اكتب خروج لإنهاء الجلسة");
     let mut interpreter = Interpreter::default();
     loop {
         print!("لسان> ");

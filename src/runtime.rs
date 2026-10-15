@@ -6,6 +6,15 @@ const MAX_STEPS: usize = 250_000;
 const MAX_CALL_DEPTH: usize = 128;
 const MAX_LIST_SIZE: usize = 10_000;
 
+/// Flow through nested statements; loops consume Break/Continue, functions consume Return.
+#[derive(Debug)]
+enum Flow {
+    Next,
+    Return(Value),
+    Break,
+    Continue,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Number(f64),
@@ -88,8 +97,10 @@ impl Interpreter {
     pub fn run_program(&mut self, statements: &[Stmt]) -> Result<Vec<String>, String> {
         self.output.clear();
         self.steps = 0;
-        if self.execute_statements(&statements, false)?.is_some() {
-            return Err("لا يجوز استخدام أرجع خارج الدالة".into());
+        match self.execute_statements(&statements, false)? {
+            Flow::Next => {},
+            Flow::Return(_) => return Err("لا يجوز استخدام أرجع خارج الدالة".into()),
+            Flow::Break | Flow::Continue => return Err("لا يجوز استخدام تحكم حلقة خارج الحلقة".into()),
         }
         Ok(std::mem::take(&mut self.output))
     }
@@ -101,19 +112,22 @@ impl Interpreter {
         } else { Ok(()) }
     }
 
-    fn execute_statements(&mut self, stmts: &[Stmt], scoped: bool) -> Result<Option<Value>, String> {
+    fn execute_statements(&mut self, stmts: &[Stmt], scoped: bool) -> Result<Flow, String> {
         if scoped { self.scopes.push(HashMap::new()); }
         let result = (|| {
             for stmt in stmts {
-                if let Some(value) = self.execute(stmt)? { return Ok(Some(value)); }
+                match self.execute(stmt)? {
+                    Flow::Next => {},
+                    signal => return Ok(signal),
+                }
             }
-            Ok(None)
+            Ok(Flow::Next)
         })();
         if scoped { self.scopes.pop(); }
         result
     }
 
-    fn execute(&mut self, stmt: &Stmt) -> Result<Option<Value>, String> {
+    fn execute(&mut self, stmt: &Stmt) -> Result<Flow, String> {
         self.tick()?;
         match stmt {
             Stmt::Import(_) => {
@@ -141,8 +155,10 @@ impl Interpreter {
                 loop {
                     self.tick()?;
                     if !self.eval_bool(cond)? { break; }
-                    if let Some(value) = self.execute_statements(stmts, true)? {
-                        return Ok(Some(value));
+                    match self.execute_statements(stmts, true)? {
+                        Flow::Next | Flow::Continue => {},
+                        Flow::Break => break,
+                        signal @ Flow::Return(_) => return Ok(signal),
                     }
                 }
             }
@@ -157,16 +173,22 @@ impl Interpreter {
                     self.scopes.push(HashMap::from([(name.clone(), value)]));
                     let result = self.execute_statements(stmts, false);
                     self.scopes.pop();
-                    if let Some(value) = result? { return Ok(Some(value)); }
+                    match result? {
+                        Flow::Next | Flow::Continue => {},
+                        Flow::Break => break,
+                        signal @ Flow::Return(_) => return Ok(signal),
+                    }
                 }
             }
             Stmt::Function(f) => { self.functions.insert(f.name.clone(), f.clone()); }
             Stmt::Return(expr) => {
                 let value = match expr { Some(expr) => self.eval(expr)?, None => Value::Null };
-                return Ok(Some(value));
+                return Ok(Flow::Return(value));
             }
+            Stmt::Break => return Ok(Flow::Break),
+            Stmt::Continue => return Ok(Flow::Continue),
         }
-        Ok(None)
+        Ok(Flow::Next)
     }
 
     fn get_variable(&self, name: &str) -> Result<Value, String> {
@@ -273,7 +295,7 @@ impl Interpreter {
             Expr::Unary(op, expr) => {
                 let value = self.eval(expr)?;
                 match (op, value) {
-                    (Op::Negate, Value::Number(n)) => Ok(Value::Number(-n)),
+                    (Op::Negate, Value::Number(n)) => finite_number(-n),
                     (Op::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
                     _ => Err("نوع قيمة غير صالح للعملية الأحادية".into()),
                 }
@@ -303,7 +325,7 @@ impl Interpreter {
             Op::NotEqual => return Ok(Value::Bool(lhs != rhs)),
             Op::Add => {
                 return match (lhs, rhs) {
-                    (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
+                    (Value::Number(a), Value::Number(b)) => finite_number(a + b),
                     (Value::Text(a), b) => Ok(Value::Text(a + &b.to_string())),
                     (a, Value::Text(b)) => Ok(Value::Text(a.to_string() + &b)),
                     (Value::List(mut a), Value::List(b)) if a.len() + b.len() <= MAX_LIST_SIZE => {
@@ -319,10 +341,11 @@ impl Interpreter {
         match (lhs, rhs) {
             (Value::Number(a), Value::Number(b)) => {
                 match op {
-                    Op::Subtract => Ok(Value::Number(a - b)),
-                    Op::Multiply => Ok(Value::Number(a * b)),
-                    Op::Divide if b != 0.0 => Ok(Value::Number(a / b)),
-                    Op::Modulo if b != 0.0 => Ok(Value::Number(a % b)),
+                    Op::Subtract => finite_number(a - b),
+                    Op::Multiply => finite_number(a * b),
+                    Op::Power => finite_number(a.powf(b)),
+                    Op::Divide if b != 0.0 => finite_number(a / b),
+                    Op::Modulo if b != 0.0 => finite_number(a % b),
                     Op::Divide | Op::Modulo => Err("القسمة على صفر ممنوعة".into()),
                     Op::Less => Ok(Value::Bool(a < b)),
                     Op::LessEqual => Ok(Value::Bool(a <= b)),
@@ -363,8 +386,17 @@ impl Interpreter {
         let updated_globals = self.scopes[0].clone();
         self.scopes = previous_scopes;
         self.scopes[0] = updated_globals;
-        Ok(result?.unwrap_or(Value::Null))
+        match result? {
+            Flow::Return(value) => Ok(value),
+            Flow::Next => Ok(Value::Null),
+            Flow::Break | Flow::Continue => Err("تحكم حلقة خارج الحلقة في الدالة".into()),
+        }
     }
+}
+
+fn finite_number(value: f64) -> Result<Value, String> {
+    if value.is_finite() { Ok(Value::Number(value)) }
+    else { Err("الناتج الحسابي خارج نطاق الأعداد المسموح".into()) }
 }
 
 fn checked_index(index: Value) -> Result<usize, String> {
@@ -386,7 +418,8 @@ fn is_builtin(name: &str) -> bool {
         "طول" | "نوع" | "نص" | "عدد" | "أضف" | "اضف" | "مدى" | "يحتوي" |
         "مفاتيح" | "قيم" | "احذف" | "قسّم" | "قسم" | "ادمج" | "استبدل" |
         "اقتطع" | "نظّف" | "نظف" | "مطلق" | "جذر" | "قرّب" | "قرب" |
-        "أدنى" | "ادنى" | "أعلى" | "اعلى" | "اقرأ_ملف" | "اكتب_ملف")
+        "أدنى" | "ادنى" | "أعلى" | "اعلى" | "اقرأ_ملف" | "اكتب_ملف" |
+        "تحقق" | "تحقق_يساوي")
 }
 
 fn require_args(name: &str, values: &[Value], count: usize) -> Result<(), String> {
@@ -403,8 +436,29 @@ fn parse_latin_number(source: &str) -> Result<f64, String> {
     if number.is_finite() { Ok(number) } else { Err("الرقم خارج النطاق المسموح".into()) }
 }
 
+fn expect_integer(value: &Value) -> Result<f64, String> {
+    match value {
+        Value::Number(n) if n.is_finite() && n.fract() == 0.0
+            && n.abs() <= 9_007_199_254_740_991.0 => Ok(*n),
+        _ => Err("مدى تتطلب أعدادًا صحيحة دقيقة ضمن النطاق المسموح".into()),
+    }
+}
+
 fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
+        "تحقق" => {
+            require_args(name, &args, 1)?;
+            match args[0] {
+                Value::Bool(true) => Ok(Value::Bool(true)),
+                Value::Bool(false) => Err("فشل التحقق: الشرط غير صحيح".into()),
+                _ => Err("تحقق تتطلب قيمة منطقية".into()),
+            }
+        }
+        "تحقق_يساوي" => {
+            require_args(name, &args, 2)?;
+            if args[0] == args[1] { Ok(Value::Bool(true)) }
+            else { Err(format!("فشل التحقق: المتوقع {} لكن الفعلي {}", args[1], args[0])) }
+        }
         "طول" => {
             require_args(name, &args, 1)?;
             match &args[0] {
@@ -589,31 +643,25 @@ fn call_builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
             }
         }
         "مدى" => {
-            if args.len() != 1 && args.len() != 2 {
-                return Err("مدى تتوقع رقمًا واحدًا أو رقمين".into());
+            if !(1..=3).contains(&args.len()) {
+                return Err("مدى تتوقع من معامل واحد إلى ثلاثة معاملات".into());
             }
-            let (start, end) = if args.len() == 1 {
-                (0.0, &args[0])
-            } else {
-                let start = match args[0] {
-                    Value::Number(n) => n,
-                    _ => return Err("مدى تتطلب أعدادًا صحيحة".into()),
-                };
-                (start, &args[1])
+            let (start, end, step) = match args.len() {
+                1 => (0.0, expect_integer(&args[0])?, 1.0),
+                2 => (expect_integer(&args[0])?, expect_integer(&args[1])?, 1.0),
+                _ => (expect_integer(&args[0])?, expect_integer(&args[1])?, expect_integer(&args[2])?),
             };
-            let end = match end {
-                Value::Number(n) => *n,
-                _ => return Err("مدى تتطلب أعدادًا صحيحة".into()),
-            };
-            if !start.is_finite() || !end.is_finite() || start.fract() != 0.0 || end.fract() != 0.0 {
-                return Err("مدى تتطلب أعدادًا صحيحة".into());
+            if step == 0.0 { return Err("خطوة مدى لا يجوز أن تكون صفرًا".into()); }
+            let raw_length = (end - start) / step;
+            let length = if raw_length <= 0.0 { 0.0 } else { raw_length.ceil() };
+            if !length.is_finite() || length > MAX_LIST_SIZE as f64 {
+                return Err("مدى تجاوز الحد الأقصى للقائمة".into());
             }
-            if start.abs() > 9_007_199_254_740_991.0 || end.abs() > 9_007_199_254_740_991.0 {
-                return Err("مدى خارج حدود الأعداد الصحيحة الدقيقة".into());
+            let mut out = Vec::with_capacity(length as usize);
+            for i in 0..length as usize {
+                out.push(Value::Number(start + (i as f64) * step));
             }
-            let length = (end - start).max(0.0);
-            if length > MAX_LIST_SIZE as f64 { return Err("مدى تجاوز الحد الأقصى للقائمة".into()); }
-            Ok(Value::List((0..length as usize).map(|i| Value::Number(start + i as f64)).collect()))
+            Ok(Value::List(out))
         }
         _ => Err(format!("دالة غير معرّفة: '{}'", name)),
     }

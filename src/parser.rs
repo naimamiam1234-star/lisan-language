@@ -3,12 +3,14 @@ use crate::lexer::{Token, TokenKind};
 use std::mem::discriminant;
 
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, String> {
-    Parser { tokens, cursor: 0 }.program()
+    Parser { tokens, cursor: 0, loop_depth: 0, function_depth: 0 }.program()
 }
 
 struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
+    loop_depth: usize,
+    function_depth: usize,
 }
 
 impl Parser {
@@ -70,7 +72,14 @@ impl Parser {
                 }
             }
             self.expect(&TokenKind::RightParen, "متوقع ')' بعد معاملات الدالة")?;
-            return Ok(Stmt::Function(Function { name, params, body: self.block()? }));
+            // A function cannot break a loop in its caller.
+            let enclosing_loop_depth = self.loop_depth;
+            self.loop_depth = 0;
+            self.function_depth += 1;
+            let body = self.block();
+            self.function_depth -= 1;
+            self.loop_depth = enclosing_loop_depth;
+            return Ok(Stmt::Function(Function { name, params, body: body? }));
         }
         if self.take(&TokenKind::Let) {
             let name = self.identifier()?;
@@ -100,18 +109,35 @@ impl Parser {
             self.expect(&TokenKind::In, "متوقع 'في' داخل حلقة لكل")?;
             let iterable = self.expression()?;
             self.expect(&TokenKind::RightParen, "متوقع ')' بعد تعبير لكل")?;
-            return Ok(Stmt::ForEach(name, iterable, self.block()?));
+            self.loop_depth += 1;
+            let body = self.block();
+            self.loop_depth -= 1;
+            return Ok(Stmt::ForEach(name, iterable, body?));
         }
         if self.take(&TokenKind::While) {
             self.expect(&TokenKind::LeftParen, "متوقع '(' بعد طالما")?;
             let cond = self.expression()?;
             self.expect(&TokenKind::RightParen, "متوقع ')' بعد الشرط")?;
-            return Ok(Stmt::While(cond, self.block()?));
+            self.loop_depth += 1;
+            let body = self.block();
+            self.loop_depth -= 1;
+            return Ok(Stmt::While(cond, body?));
         }
         if self.take(&TokenKind::Return) {
+            if self.function_depth == 0 { return Err(self.error("لا يجوز استخدام أرجع خارج الدالة")); }
             let val = if self.is(&TokenKind::Semicolon) { None } else { Some(self.expression()?) };
             self.semicolon()?;
             return Ok(Stmt::Return(val));
+        }
+        if self.take(&TokenKind::Break) {
+            if self.loop_depth == 0 { return Err(self.error("لا يجوز استخدام توقف خارج الحلقة")); }
+            self.semicolon()?;
+            return Ok(Stmt::Break);
+        }
+        if self.take(&TokenKind::Continue) {
+            if self.loop_depth == 0 { return Err(self.error("لا يجوز استخدام تابع خارج الحلقة")); }
+            self.semicolon()?;
+            return Ok(Stmt::Continue);
         }
         if self.is(&TokenKind::LeftBrace) { return Ok(Stmt::Block(self.block()?)); }
         let expr = self.expression()?;
@@ -196,7 +222,15 @@ impl Parser {
     fn unary(&mut self) -> Result<Expr, String> {
         if self.take(&TokenKind::Bang) { return Ok(Expr::Unary(Op::Not, Box::new(self.unary()?))); }
         if self.take(&TokenKind::Minus) { return Ok(Expr::Unary(Op::Negate, Box::new(self.unary()?))); }
-        self.call()
+        self.power()
+    }
+    fn power(&mut self) -> Result<Expr, String> {
+        let base = self.call()?;
+        if self.take(&TokenKind::Power) {
+            // Right associative: 2 ** 3 ** 2 == 512.
+            return Ok(Expr::Binary(Box::new(base), Op::Power, Box::new(self.unary()?)));
+        }
+        Ok(base)
     }
     fn call(&mut self) -> Result<Expr, String> {
         let mut expr = self.primary()?;

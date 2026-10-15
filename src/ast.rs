@@ -17,7 +17,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Op {
-    Add, Subtract, Multiply, Divide, Modulo,
+    Add, Subtract, Multiply, Divide, Modulo, Power,
     Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual,
     And, Or, Not, Negate,
 }
@@ -41,4 +41,6 @@ pub enum Stmt {
     ForEach(String, Expr, Vec<Stmt>),
     Function(Function),
     Return(Option<Expr>),
+    Break,
+    Continue,
 }

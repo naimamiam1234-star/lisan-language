@@ -1,9 +1,9 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
-    Let, Print, If, Else, While, ForEach, In, Function, Return, Import, True, False, Null,
+    Let, Print, If, Else, While, ForEach, In, Function, Return, Import, Break, Continue, True, False, Null,
     Identifier(String), Number(f64), String(String),
     LeftParen, RightParen, LeftBrace, RightBrace, LeftBracket, RightBracket, Comma, Colon, Semicolon,
-    Plus, Minus, Star, Slash, Percent,
+    Plus, Minus, Star, Power, Slash, Percent,
     Equal, EqualEqual, Bang, BangEqual,
     Less, LessEqual, Greater, GreaterEqual, AndAnd, OrOr, Eof,
 }
@@ -58,6 +58,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
             ';' | '؛' => TokenKind::Semicolon,
             '+' => TokenKind::Plus,
             '-' => TokenKind::Minus,
+            '*' if chars.get(i + 1) == Some(&'*') => { i += 1; column += 1; TokenKind::Power }
             '*' => TokenKind::Star,
             '/' => TokenKind::Slash,
             '%' => TokenKind::Percent,
@@ -99,7 +100,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                 }
                 TokenKind::String(s)
             }
-            _ if matches!(c, '٠'..='٩' | '۰'..='۹') => {
+            _ if c.is_numeric() && !c.is_ascii_digit() => {
                 return Err(format!("السطر {}، العمود {}: استخدم الأرقام اللاتينية 0-9 فقط", line, column));
             }
             _ if c.is_ascii_digit() => {
@@ -121,9 +122,29 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                         column += 1;
                     }
                 }
+                if matches!(chars.get(i).copied(), Some('e' | 'E')) {
+                    num.push(chars[i]);
+                    i += 1;
+                    column += 1;
+                    if matches!(chars.get(i).copied(), Some('+' | '-')) {
+                        num.push(chars[i]);
+                        i += 1;
+                        column += 1;
+                    }
+                    if !chars.get(i).copied().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        return Err(format!("السطر {}، العمود {}: أس العدد العلمي غير مكتمل", start_line, start_col));
+                    }
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        num.push(chars[i]);
+                        i += 1;
+                        column += 1;
+                    }
+                }
                 i -= 1;
                 column -= 1;
-                TokenKind::Number(num.parse().map_err(|_| format!("السطر {}: رقم غير صحيح", start_line))?)
+                let parsed: f64 = num.parse().map_err(|_| format!("السطر {}: رقم غير صحيح", start_line))?;
+                if !parsed.is_finite() { return Err(format!("السطر {}: الرقم خارج النطاق المسموح", start_line)); }
+                TokenKind::Number(parsed)
             }
             _ if is_ident_start(c) => {
                 while i + 1 < chars.len() && is_ident_continue(chars[i + 1]) {
@@ -142,6 +163,8 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                     "دالة" => TokenKind::Function,
                     "استورد" => TokenKind::Import,
                     "أرجع" | "ارجع" => TokenKind::Return,
+                    "توقف" => TokenKind::Break,
+                    "تابع" => TokenKind::Continue,
                     "صحيح" => TokenKind::True,
                     "خطأ" | "خطا" => TokenKind::False,
                     "لاشيء" => TokenKind::Null,

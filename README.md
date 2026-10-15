@@ -1,8 +1,17 @@
 <div dir="rtl">
 
-# لسان LISAN — نواة موحّدة 0.5.0
+# لسان LISAN — نواة موحّدة 0.6.0
 
 لغة برمجة عربية فصيحة قيد التطوير، بنواة مفتوحة المصدر مكتوبة بلغة Rust، وتعمل حاليًا كمفسّر. تستعمل الشيفرة **الأرقام اللاتينية 0-9 فقط**، والفاصلة العشرية `.`، مع دعم الحروف العربية UTF-8.
+
+## جديد الإصدار 0.6.0
+
+- `توقف؛` و`تابع؛` داخل الحلقات مع الكشف المبكر عن سوء الاستخدام.
+- عامل الأسّ `**`، والأرقام العلمية مثل `1e3` مع الاستمرار في فرض الأرقام اللاتينية.
+- دعم `مدى(بداية، نهاية، خطوة)` للخُطوات السالبة والموجبة.
+- فحص نتائج العمليات الحسابية لمنع `Infinity` و`NaN`.
+- الدالتان `تحقق` و`تحقق_يساوي` وأمر CLI: `lisan --test examples/testing.lsn`.
+- توسيع اختبارات Rust وتمييز الشيفرة ومقاطع VS Code.
 
 ## ما اكتمل في هذه النسخة
 
@@ -30,6 +39,7 @@ cargo build --release
 cargo run -- examples/dictionary.lsn
 cargo run -- examples/standard_library.lsn
 cargo run -- --check examples/modules/main.lsn
+cargo run -- --test examples/testing.lsn
 cargo run -- --tokens examples/hello.lsn
 cargo run -- --ast examples/hello.lsn
 cargo run -- --build examples/modules/main.lsn --output app
