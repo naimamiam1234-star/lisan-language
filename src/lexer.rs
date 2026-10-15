@@ -162,4 +162,4 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, String> {
 }
 
 fn is_ident_start(c: char) -> bool { c.is_alphabetic() || c == '_' }
-fn is_ident_continue(c: char) -> bool { c.is_alphanumeric() || c == '_' }
+fn is_ident_continue(c: char) -> bool { is_ident_start(c) || c.is_ascii_digit() }

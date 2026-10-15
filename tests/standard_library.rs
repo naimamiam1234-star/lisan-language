@@ -65,3 +65,12 @@ fn source_with_arabic_comma_and_latin_decimal() {
 fn reject_invalid_map_literal() {
     assert!(run("دع م = {عدد: 1}؛").unwrap_err().contains("مفتاح"));
 }
+
+#[test]
+fn latin_digits_allowed_in_identifiers_but_not_arabic_indic_digits() {
+    assert_eq!(run("ليكن عدد2 = 7؛ اطبع(عدد2)؛").unwrap(), ["7"]);
+    for input in ["ليكن عدد٢ = 7؛", "ليكن عدد۲ = 7؛", "اطبع(12٣)؛"] {
+        let err = run(input).expect_err("non Latin source digit must fail");
+        assert!(err.contains("0-9"), "{input} returned {err}");
+    }
+}
