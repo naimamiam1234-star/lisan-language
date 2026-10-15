@@ -4,11 +4,11 @@ use std::env;
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.len() == 1 && (args[0] == "-h" || args[0] == "--help") {
-        println!("لسان 0.7.0 | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn  يترجم إلى ملف آلة أصلي (الخيار الافتراضي)\n  lisan --interpret ملف.lsn  المسار القديم للتوافق فقط\n  lisan --check ملف.lsn  لفحص قواعد الملف واستيراداته\n  lisan --test ملف.lsn   تشغيل تحققات البرنامج\n  lisan --native ملف.lsn --output البرنامج  ترجمة إلى ملف آلة أصلي عبر Clang\n  lisan --emit-llvm ملف.lsn --output الملف.ll  إخراج LLVM IR\n  lisan --build ملف.lsn [--output الناتج]  الطريقة القديمة (تضم المفسّر)\n  lisan --tokens ملف.lsn  عرض الرموز\n  lisan --ast ملف.lsn  عرض شجرة بناء التعليمات\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 عرض تعليمات المترجم");
+        println!("لسان 0.8.0 | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn  يترجم إلى ملف آلة أصلي (الخيار الافتراضي)\n  lisan --interpret ملف.lsn  المسار القديم للتوافق فقط\n  lisan --check ملف.lsn  لفحص قواعد الملف واستيراداته\n  lisan --test ملف.lsn   تشغيل تحققات البرنامج\n  lisan --native ملف.lsn --output البرنامج  ترجمة إلى ملف آلة أصلي عبر Clang\n  lisan --emit-llvm ملف.lsn --output الملف.ll  إخراج LLVM IR\n  lisan --build ملف.lsn [--output الناتج]  الطريقة القديمة (تضم المفسّر)\n  lisan --tokens ملف.lsn  عرض الرموز\n  lisan --ast ملف.lsn  عرض شجرة بناء التعليمات\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 عرض تعليمات المترجم");
         return;
     }
     if args.len() == 1 && (args[0] == "-V" || args[0] == "--version") {
-        println!("لسان 0.7.0");
+        println!("لسان 0.8.0");
         return;
     }
     if args.len() >= 2 && (args[0] == "--native" || args[0] == "--emit-llvm") {

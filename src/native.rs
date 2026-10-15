@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Type { Number, Boolean, Text }
+enum Type { Number, Boolean, Text, NumberList }
 impl Type {
-    fn llvm(self) -> &'static str { match self { Self::Number => "double", Self::Boolean => "i1", Self::Text => "ptr" } }
-    fn arabic(self) -> &'static str { match self { Self::Number => "عدد", Self::Boolean => "منطقي", Self::Text => "نص" } }
+    fn llvm(self) -> &'static str { match self { Self::Number => "double", Self::Boolean => "i1", Self::Text => "ptr", Self::NumberList => "{ i64, ptr }" } }
+    fn arabic(self) -> &'static str { match self { Self::Number => "عدد", Self::Boolean => "منطقي", Self::Text => "نص", Self::NumberList => "قائمة أرقام" } }
 }
 #[derive(Clone)]
 struct Value { ty: Type, operand: String }
@@ -35,6 +35,8 @@ impl<'a> FunctionWriter<'a> {
     fn new_reg(&mut self) -> String { let i=self.next; self.next+=1; format!("%t{}", i) }
     fn new_label(&mut self, prefix: &str) -> String { let i=self.next; self.next+=1; format!("{}.{}",prefix,i) }
     fn instruction(&mut self, s: impl Into<String>) { self.lines.push(format!("  {}",s.into())); }
+    // LLVM alloca in the function entry avoids unbounded stack growth inside loops.
+    fn entry_alloca(&mut self, s: impl Into<String>) { self.lines.insert(1,format!("  {}",s.into())); }
     fn branch(&mut self, label: &str) { self.instruction(format!("br label %{}",label)); self.terminated=true; }
     fn label(&mut self, label: &str) { self.lines.push(format!("{}:",label)); self.terminated=false; }
     fn scope<F>(&mut self, f: F) -> Result<(), String> where F: FnOnce(&mut Self)->Result<(),String> {
@@ -47,12 +49,134 @@ impl<'a> FunctionWriter<'a> {
     fn register(&mut self, name:&str, value:Value)->Result<(),String> {
         if self.scopes.last().unwrap().contains_key(name) {return Err(format!("المتغير '{}' معرّف مسبقًا في الكتلة",name));}
         let ptr=self.new_reg(); let llvm=value.ty.llvm();
-        self.instruction(format!("{} = alloca {}",ptr,llvm));
+        self.entry_alloca(format!("{} = alloca {}",ptr,llvm));
         self.instruction(format!("store {} {}, ptr {}",llvm,value.operand,ptr));
         self.scopes.last_mut().unwrap().insert(name.into(),Binding { ty:value.ty,ptr }); Ok(())
     }
     fn requires(&self, value:&Value, expected:Type, what:&str)->Result<(),String> {
         if value.ty!=expected {return Err(format!("{} تتطلب {}، لكن القيمة {}",what,expected.arabic(),value.ty.arabic()));} Ok(())
+    }
+    fn convert_to_text(&mut self, value: Value) -> Result<Value,String> {
+        match value.ty {
+            Type::Text => Ok(value),
+            Type::Boolean => {
+                let reg=self.new_reg();
+                self.instruction(format!("{} = select i1 {}, ptr @.true_text, ptr @.false_text",reg,value.operand));
+                Ok(Value{ty:Type::Text,operand:reg})
+            }
+            Type::Number => {
+                let ptr=self.new_reg();
+                self.instruction(format!("{} = call ptr @malloc(i64 64)",ptr));
+                self.instruction(format!("call i32 (ptr, i64, ptr, ...) @snprintf(ptr {}, i64 64, ptr @.number_text_format, double {})",ptr,value.operand));
+                Ok(Value{ty:Type::Text,operand:ptr})
+            }
+            Type::NumberList => Err("لا يمكن دمج قائمة مع نص مباشرة في المترجم الأصلي".into()),
+        }
+    }
+    fn reject_unless(&mut self, condition:String, message:&str) {
+        let ok=self.new_label("guard.ok");let bad=self.new_label("guard.error");
+        self.instruction(format!("br i1 {}, label %{}, label %{}",condition,ok,bad));self.terminated=true;
+        self.label(&bad);
+        let sym=self.module.intern_text(message);
+        self.instruction(format!("call i32 @puts(ptr @{})",sym));
+        self.instruction("call void @exit(i32 1)");
+        self.instruction("unreachable");self.terminated=true;
+        self.label(&ok);
+    }
+    fn list_length_and_data(&mut self,list:&Value)->(String,String) {
+        let len=self.new_reg();self.instruction(format!("{} = extractvalue {{ i64, ptr }} {}, 0",len,list.operand));
+        let ptr=self.new_reg();self.instruction(format!("{} = extractvalue {{ i64, ptr }} {}, 1",ptr,list.operand));
+        (len,ptr)
+    }
+    fn list_item_ptr(&mut self,list:&Value,index:Value)->Result<String,String> {
+        self.requires(&index,Type::Number,"فهرس القائمة")?;
+        let (len,data)=self.list_length_and_data(list);
+        let is_finite=self.new_reg();
+        self.instruction(format!("{} = fcmp ord double {}, {}",is_finite,index.operand,index.operand));
+        let integral=self.new_reg();
+        self.instruction(format!("{} = call double @llvm.floor.f64(double {})",integral,index.operand));
+        let is_int=self.new_reg();self.instruction(format!("{} = fcmp oeq double {}, {}",is_int,index.operand,integral));
+        let positive=self.new_reg();self.instruction(format!("{} = fcmp oge double {}, 0.0",positive,index.operand));
+        let len_float=self.new_reg();self.instruction(format!("{} = uitofp i64 {} to double",len_float,len));
+        let in_range=self.new_reg();self.instruction(format!("{} = fcmp olt double {}, {}",in_range,index.operand,len_float));
+        let ok_a=self.new_reg();self.instruction(format!("{} = and i1 {}, {}",ok_a,is_finite,is_int));
+        let ok_b=self.new_reg();self.instruction(format!("{} = and i1 {}, {}",ok_b,positive,in_range));
+        let ok=self.new_reg();self.instruction(format!("{} = and i1 {}, {}",ok,ok_a,ok_b));
+        self.reject_unless(ok,"خطأ: فهرس القائمة خارج الحدود أو غير صحيح");
+        let pos=self.new_reg();self.instruction(format!("{} = fptoui double {} to i64",pos,index.operand));
+        let gep=self.new_reg();self.instruction(format!("{} = getelementptr double, ptr {}, i64 {}",gep,data,pos));
+        Ok(gep)
+    }
+    fn build_numeric_list(&mut self,items:&[Expr])->Result<Value,String> {
+        if items.len()>100_000{return Err("تجاوزت القائمة الحد الأقصى المسموح".into());}
+        let cap=items.len().max(1);
+        let arr=self.new_reg();self.entry_alloca(format!("{} = alloca [{} x double]",arr,cap));
+        for (idx,element) in items.iter().enumerate(){
+            let item=self.generate_expr(element)?;
+            self.requires(&item,Type::Number,"عنصر القائمة")?;
+            let addr=self.new_reg();self.instruction(format!("{} = getelementptr [{} x double], ptr {}, i64 0, i64 {}",addr,cap,arr,idx));
+            self.instruction(format!("store double {}, ptr {}",item.operand,addr));
+        }
+        let first=self.new_reg();self.instruction(format!("{} = insertvalue {{ i64, ptr }} poison, i64 {}, 0",first,items.len()));
+        let second=self.new_reg();self.instruction(format!("{} = insertvalue {{ i64, ptr }} {}, ptr {}, 1",second,first,arr));
+        Ok(Value{ty:Type::NumberList,operand:second})
+    }
+    fn for_each(&mut self,name:&str,iterable:&Expr,body:&[Stmt])->Result<(),String> {
+        if let Expr::Call(function,args)=iterable {
+            if function=="مدى" {return self.for_range(name,args,body);}
+        }
+        let list=self.generate_expr(iterable)?;
+        self.requires(&list,Type::NumberList,"حلقة لكل")?;
+        let (length,data)=self.list_length_and_data(&list);
+        let index_ptr=self.new_reg();self.entry_alloca(format!("{} = alloca i64",index_ptr));
+        self.instruction(format!("store i64 0, ptr {}",index_ptr));
+        let cond=self.new_label("foreach.cond");let step=self.new_label("foreach.step");
+        let work=self.new_label("foreach.body");let end=self.new_label("foreach.end");
+        self.branch(&cond);self.label(&cond);
+        let index=self.new_reg();self.instruction(format!("{} = load i64, ptr {}",index,index_ptr));
+        let test=self.new_reg();self.instruction(format!("{} = icmp ult i64 {}, {}",test,index,length));
+        self.instruction(format!("br i1 {}, label %{}, label %{}",test,work,end));self.terminated=true;
+        self.label(&work);
+        let gep=self.new_reg();self.instruction(format!("{} = getelementptr double, ptr {}, i64 {}",gep,data,index));
+        let value=self.new_reg();self.instruction(format!("{} = load double, ptr {}",value,gep));
+        self.loops.push(LoopTarget{continue_label:step.clone(),break_label:end.clone()});
+        let r=self.scope(|this|{this.register(name,Value{ty:Type::Number,operand:value})?;this.statements(body)});
+        self.loops.pop();r?;
+        if !self.terminated{self.branch(&step);}
+        self.label(&step);
+        let current=self.new_reg();self.instruction(format!("{} = load i64, ptr {}",current,index_ptr));
+        let next=self.new_reg();self.instruction(format!("{} = add i64 {}, 1",next,current));
+        self.instruction(format!("store i64 {}, ptr {}",next,index_ptr));
+        self.branch(&cond);self.label(&end);Ok(())
+    }
+    fn for_range(&mut self,name:&str,args:&[Expr],body:&[Stmt])->Result<(),String>{
+        if !(1..=3).contains(&args.len()){return Err("مدى تقبل من معامل إلى ثلاثة".into());}
+        let mut params=Vec::new();
+        for arg in args {let v=self.generate_expr(arg)?;self.requires(&v,Type::Number,"معامل مدى")?;params.push(v.operand);}
+        let (start,end,step)=match params.len(){1=>("0.0".to_string(),params[0].clone(),"1.0".to_string()),2=>(params[0].clone(),params[1].clone(),"1.0".to_string()),_=>(params[0].clone(),params[1].clone(),params[2].clone())};
+        let step_good=self.new_reg();self.instruction(format!("{} = fcmp une double {}, 0.0",step_good,step));
+        self.reject_unless(step_good,"خطأ: خطوة مدى لا يجوز أن تكون صفرًا");
+        let ptr=self.new_reg();self.entry_alloca(format!("{} = alloca double",ptr));
+        self.instruction(format!("store double {}, ptr {}",start,ptr));
+        let cond=self.new_label("range.cond");let body_label=self.new_label("range.body");
+        let step_label=self.new_label("range.step");let done=self.new_label("range.end");
+        self.branch(&cond);self.label(&cond);
+        let current=self.new_reg();self.instruction(format!("{} = load double, ptr {}",current,ptr));
+        let upwards=self.new_reg();self.instruction(format!("{} = fcmp ogt double {}, 0.0",upwards,step));
+        let less=self.new_reg();self.instruction(format!("{} = fcmp olt double {}, {}",less,current,end));
+        let greater=self.new_reg();self.instruction(format!("{} = fcmp ogt double {}, {}",greater,current,end));
+        let active=self.new_reg();self.instruction(format!("{} = select i1 {}, i1 {}, i1 {}",active,upwards,less,greater));
+        self.instruction(format!("br i1 {}, label %{}, label %{}",active,body_label,done));self.terminated=true;
+        self.label(&body_label);
+        self.loops.push(LoopTarget{continue_label:step_label.clone(),break_label:done.clone()});
+        let r=self.scope(|this|{this.register(name,Value{ty:Type::Number,operand:current})?;this.statements(body)});
+        self.loops.pop();r?;
+        if !self.terminated{self.branch(&step_label);}
+        self.label(&step_label);
+        let saved=self.new_reg();self.instruction(format!("{} = load double, ptr {}",saved,ptr));
+        let next=self.new_reg();self.instruction(format!("{} = fadd double {}, {}",next,saved,step));
+        self.instruction(format!("store double {}, ptr {}",next,ptr));
+        self.branch(&cond);self.label(&done);Ok(())
     }
     fn generate_expr(&mut self, e:&Expr)->Result<Value,String> {
         match e {
@@ -64,6 +188,24 @@ impl<'a> FunctionWriter<'a> {
             Expr::Text(v)=>{
                 let sym=self.module.intern_text(v);
                 Ok(Value {ty:Type::Text,operand:format!("@{}",sym)})
+            }
+            Expr::List(items)=>self.build_numeric_list(items),
+            Expr::Index(target,index)=>{
+                let list=self.generate_expr(target)?;
+                self.requires(&list,Type::NumberList,"الفهرسة")?;
+                let idx=self.generate_expr(index)?;
+                let addr=self.list_item_ptr(&list,idx)?;
+                let value=self.new_reg();self.instruction(format!("{} = load double, ptr {}",value,addr));
+                Ok(Value{ty:Type::Number,operand:value})
+            }
+            Expr::AssignIndex(name,index,rhs)=>{
+                let binding=self.lookup(name)?;
+                if binding.ty!=Type::NumberList{return Err("إسناد الفهرس يتطلب قائمة أرقام".into());}
+                let list_ptr=self.new_reg();self.instruction(format!("{} = load {{ i64, ptr }}, ptr {}",list_ptr,binding.ptr));
+                let idx=self.generate_expr(index)?;
+                let addr=self.list_item_ptr(&Value{ty:Type::NumberList,operand:list_ptr},idx)?;
+                let val=self.generate_expr(rhs)?;self.requires(&val,Type::Number,"القيمة المسندة إلى القائمة")?;
+                self.instruction(format!("store double {}, ptr {}",val.operand,addr));Ok(val)
             }
             Expr::Variable(name)=>{
                 let binding=self.lookup(name)?;let reg=self.new_reg();
@@ -115,6 +257,23 @@ impl<'a> FunctionWriter<'a> {
                     return Ok(Value{ty:Type::Boolean,operand:reg});
                 }
                 let a=self.generate_expr(left)?;let b=self.generate_expr(right)?;
+                if matches!(op,Op::Add) && (a.ty==Type::Text||b.ty==Type::Text) {
+                    let a=self.convert_to_text(a)?;let b=self.convert_to_text(b)?;
+                    let size_a=self.new_reg();self.instruction(format!("{} = call i64 @strlen(ptr {})",size_a,a.operand));
+                    let size_b=self.new_reg();self.instruction(format!("{} = call i64 @strlen(ptr {})",size_b,b.operand));
+                    let sum=self.new_reg();self.instruction(format!("{} = add i64 {}, {}",sum,size_a,size_b));
+                    let length=self.new_reg();self.instruction(format!("{} = add i64 {}, 1",length,sum));
+                    let buf=self.new_reg();self.instruction(format!("{} = call ptr @malloc(i64 {})",buf,length));
+                    self.instruction(format!("call ptr @strcpy(ptr {}, ptr {})",buf,a.operand));
+                    self.instruction(format!("call ptr @strcat(ptr {}, ptr {})",buf,b.operand));
+                    return Ok(Value{ty:Type::Text,operand:buf});
+                }
+                if matches!(op,Op::Equal | Op::NotEqual) && a.ty==Type::Text && b.ty==Type::Text {
+                    let cmp=self.new_reg();self.instruction(format!("{} = call i32 @strcmp(ptr {}, ptr {})",cmp,a.operand,b.operand));
+                    let out=self.new_reg();let code=if matches!(op,Op::Equal){"eq"}else{"ne"};
+                    self.instruction(format!("{} = icmp {} i32 {}, 0",out,code,cmp));
+                    return Ok(Value{ty:Type::Boolean,operand:out});
+                }
                 if a.ty!=b.ty {return Err("لا يجوز خلط الأنواع في العملية الثنائية".into());}
                 let (cmd,out_ty) = match op {
                     Op::Add if a.ty==Type::Number => ("fadd",Type::Number),
@@ -143,6 +302,61 @@ impl<'a> FunctionWriter<'a> {
                 Ok(Value{ty:out_ty,operand:reg})
             }
             Expr::Call(name,args)=>{
+                match name.as_str() {
+                    "طول" if args.len()==1=>{
+                        let v=self.generate_expr(&args[0])?;
+                        let length=if v.ty==Type::NumberList {
+                            let (len,_)=self.list_length_and_data(&v);len
+                        } else if v.ty==Type::Text {
+                            let len=self.new_reg();self.instruction(format!("{} = call i64 @lisan_utf8_len(ptr {})",len,v.operand));len
+                        } else {return Err("طول تتطلب نصًا أو قائمة أرقام".into())};
+                        let val=self.new_reg();self.instruction(format!("{} = uitofp i64 {} to double",val,length));
+                        return Ok(Value{ty:Type::Number,operand:val});
+                    }
+                    "مطلق"|"جذر"|"قرّب"|"قرب" if args.len()==1=>{
+                        let v=self.generate_expr(&args[0])?;self.requires(&v,Type::Number,"دالة رياضية")?;
+                        let intrinsic=match name.as_str(){"مطلق"=>"fabs","جذر"=>"sqrt",_=>"round"};
+                        if intrinsic=="sqrt" {
+                            let valid=self.new_reg();self.instruction(format!("{} = fcmp oge double {}, 0.0",valid,v.operand));
+                            self.reject_unless(valid,"خطأ: الجذر التربيعي لعدد سالب غير مدعوم");
+                        }
+                        let reg=self.new_reg();self.instruction(format!("{} = call double @llvm.{}.f64(double {})",reg,intrinsic,v.operand));
+                        self.module.intrinsics.insert(intrinsic.into());
+                        return Ok(Value{ty:Type::Number,operand:reg});
+                    }
+                    "أدنى"|"ادنى"|"أعلى"|"اعلى" if args.len()==2=>{
+                        let a=self.generate_expr(&args[0])?;let b=self.generate_expr(&args[1])?;
+                        self.requires(&a,Type::Number,"المقارنة")?;self.requires(&b,Type::Number,"المقارنة")?;
+                        let cmp=self.new_reg();let op=if name=="أدنى"||name=="ادنى"{"olt"}else{"ogt"};
+                        self.instruction(format!("{} = fcmp {} double {}, {}",cmp,op,a.operand,b.operand));
+                        let reg=self.new_reg();self.instruction(format!("{} = select i1 {}, double {}, double {}",reg,cmp,a.operand,b.operand));
+                        return Ok(Value{ty:Type::Number,operand:reg});
+                    }
+                    "تحقق" if args.len()==1=>{
+                        let v=self.generate_expr(&args[0])?;self.requires(&v,Type::Boolean,"تحقق")?;
+                        self.reject_unless(v.operand.clone(),"فشل التحقق: الشرط غير صحيح");return Ok(v);
+                    }
+                    "تحقق_يساوي" if args.len()==2=>{
+                        let left=self.generate_expr(&args[0])?;let right=self.generate_expr(&args[1])?;
+                        if left.ty!=right.ty{return Err("تحقق_يساوي تتطلب نوعين متساويين".into());}
+                        let comparison=match left.ty {
+                            Type::Number=>format!("fcmp oeq double {}, {}",left.operand,right.operand),
+                            Type::Boolean=>format!("icmp eq i1 {}, {}",left.operand,right.operand),
+                            Type::Text=>{
+                                let cmp=self.new_reg();self.instruction(format!("{} = call i32 @strcmp(ptr {}, ptr {})",cmp,left.operand,right.operand));
+                                format!("icmp eq i32 {}, 0",cmp)
+                            },
+                            Type::NumberList=>return Err("تحقق_يساوي للقوائم غير مدعوم بعد".into()),
+                        };
+                        let eq=self.new_reg();self.instruction(format!("{} = {}",eq,comparison));
+                        self.reject_unless(eq.clone(),"فشل التحقق: القيمتان غير متساويتين");
+                        return Ok(Value{ty:Type::Boolean,operand:eq});
+                    }
+                    "نص" if args.len()==1=>{
+                        let v=self.generate_expr(&args[0])?;return self.convert_to_text(v);
+                    }
+                    _=>{}
+                }
                 let (symbol,count)=self.module.functions.get(name).cloned().ok_or_else(||format!("الدالة '{}' غير مدعومة في المترجم الأصلي",name))?;
                 if count!=args.len(){return Err(format!("الدالة '{}' تتطلب {} معاملات",name,count));}
                 let mut operands=Vec::new();
@@ -151,7 +365,7 @@ impl<'a> FunctionWriter<'a> {
                 self.instruction(format!("{} = call double @{}({})",reg,symbol,operands.join(", ")));
                 Ok(Value{ty:Type::Number,operand:reg})
             }
-            _=>Err("هذه البنية لم تُنفّذ بعد في المترجم الأصلي (القوائم والقواميس والفهرسة)".into())
+            _=>Err("هذه البنية لم تُنفّذ بعد في المترجم الأصلي (القواميس أو القيم الفارغة)".into())
         }
     }
     fn statements(&mut self,stmts:&[Stmt])->Result<(),String>{
@@ -166,6 +380,7 @@ impl<'a> FunctionWriter<'a> {
                 match value.ty {
                     Type::Number=>self.instruction(format!("call i32 (ptr, ...) @printf(ptr @.number_format, double {})",value.operand)),
                     Type::Text=>self.instruction(format!("call i32 @puts(ptr {})",value.operand)),
+                    Type::NumberList=>return Err("اطبع لا تدعم طباعة قائمة كاملة مباشرة؛ استخدم لكل".into()),
                     Type::Boolean=>{
                         let reg=self.new_reg();
                         self.instruction(format!("{} = select i1 {}, ptr @.true_text, ptr @.false_text",reg,value.operand));
@@ -205,14 +420,14 @@ impl<'a> FunctionWriter<'a> {
             }
             Stmt::Function(_)=>Err("تعريف دالة داخل كتلة غير مدعوم في المترجم الأصلي".into()),
             Stmt::Import(_)=>Err("الاستيراد المتداخل غير مسموح".into()),
-            Stmt::ForEach(_,_,_)=>Err("حلقة لكل غير مدعومة بعد في المترجم الأصلي، استخدم بينما".into()),
+            Stmt::ForEach(name,iterable,body)=>self.for_each(name,iterable,body),
         }
     }
 }
 
-struct Module { strings: Vec<(String,Vec<u8>)>, functions:HashMap<String,(String,usize)>, needs_pow:bool }
+struct Module { strings: Vec<(String,Vec<u8>)>, functions:HashMap<String,(String,usize)>, needs_pow:bool, intrinsics:std::collections::HashSet<String> }
 impl Module {
-    fn new()->Self { Self { strings:Vec::new(),functions:HashMap::new(),needs_pow:false } }
+    fn new()->Self { Self { strings:Vec::new(),functions:HashMap::new(),needs_pow:false,intrinsics:std::collections::HashSet::new() } }
     fn intern_text(&mut self, value:&str)->String {
         let sym=format!(".text_{}",self.strings.len());
         let mut bytes=value.as_bytes().to_vec(); bytes.push(0);
@@ -251,8 +466,13 @@ pub fn generate_llvm(stmts:&[Stmt])->Result<String,String>{
     if !writer.terminated {writer.instruction("ret i32 0");}
     let main_ir=format!("define i32 @main() {{\n{}\n}}",writer.lines.join("\n"));
     let mut ir=String::from("; Native Lisan: source language compiled to LLVM IR, not interpreted\nsource_filename = \"lisan_native\"\n\n");
-    ir.push_str("declare i32 @puts(ptr)\ndeclare i32 @printf(ptr, ...)\n");
+    ir.push_str("declare i32 @puts(ptr)\ndeclare i32 @printf(ptr, ...)\ndeclare i32 @snprintf(ptr, i64, ptr, ...)\ndeclare ptr @malloc(i64)\ndeclare ptr @strcpy(ptr, ptr)\ndeclare ptr @strcat(ptr, ptr)\ndeclare i64 @strlen(ptr)\ndeclare i32 @strcmp(ptr, ptr)\ndeclare void @exit(i32)\ndeclare double @llvm.floor.f64(double)\n");
+    for intrinsic in ["fabs","sqrt","round"] {if module.intrinsics.contains(intrinsic){ir.push_str(&format!("declare double @llvm.{}.f64(double)\n",intrinsic));}}
     if module.needs_pow {ir.push_str("declare double @llvm.pow.f64(double, double)\n");}
+    // UTF-8 length counts Unicode scalar values, not bytes.
+    ir.push_str("define i64 @lisan_utf8_len(ptr %str) {\nentry:\n  br label %loop\nloop:\n  %p = phi ptr [ %str, %entry ], [ %next, %body ]\n  %count = phi i64 [ 0, %entry ], [ %add, %body ]\n  %byte = load i8, ptr %p\n  %end = icmp eq i8 %byte, 0\n  br i1 %end, label %done, label %body\nbody:\n  %mask = and i8 %byte, -64\n  %continuation = icmp eq i8 %mask, -128\n  %increment = zext i1 %continuation to i64\n  %amount = sub i64 1, %increment\n  %add = add i64 %count, %amount\n  %next = getelementptr i8, ptr %p, i64 1\n  br label %loop\ndone:\n  ret i64 %count\n}\n");
+    let text_fmt=b"%.15g\0";
+    ir.push_str(&format!("@.number_text_format = private constant [{} x i8] c\"{}\"\n",text_fmt.len(),escape_llvm(text_fmt)));
     let number_fmt=b"%.15g\n\0";
     ir.push_str(&format!("@.number_format = private unnamed_addr constant [{} x i8] c\"{}\"\n",number_fmt.len(),escape_llvm(number_fmt)));
     for (sym,value) in [('.'.to_string()+"true_text","صحيح"),('.'.to_string()+"false_text","خطأ")] {
@@ -294,7 +514,7 @@ mod tests {
     use super::*;
     fn translate(source:&str)->Result<String,String>{generate_llvm(&crate::parser::parse(crate::lexer::tokenize(source)? )?)}
     #[test] fn real_machine_ir(){let ir=translate("ليكن س = 3؛ اطبع(س ** 2)؛").unwrap();assert!(ir.contains("define i32 @main"));assert!(ir.contains("llvm.pow.f64"));assert!(!ir.contains("Interpreter"));}
-    #[test] fn dynamic_features_rejected(){let e=translate("اطبع([1، 2])؛").unwrap_err();assert!(e.contains("لم تُنفّذ"));}
+    #[test] fn dynamic_features_rejected(){let e=translate("اطبع({\"س\": 2})؛").unwrap_err();assert!(e.contains("لم تُنفّذ"));}
     #[test] fn types_checked(){let e=translate("ليكن س = 2؛ س = صحيح؛").unwrap_err();assert!(e.contains("الإسناد"));}
     #[test] fn short_circuit_ir(){let ir=translate("اطبع(صحيح و خطأ)؛").unwrap();assert!(ir.contains("phi i1"));}
 }

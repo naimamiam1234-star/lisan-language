@@ -14,7 +14,7 @@ fn native_ir_contains_no_interpreter() {
 #[test]
 fn native_rejects_dynamic_list_with_clear_message() {
     let ast=lisan::parser::parse(lisan::lexer::tokenize("اطبع([1،2])؛").unwrap()).unwrap();
-    assert!(lisan::native::generate_llvm(&ast).unwrap_err().contains("لم تُنفّذ"));
+    assert!(lisan::native::generate_llvm(&ast).unwrap_err().contains("قائمة"));
 }
 
 #[cfg(target_os="linux")]

@@ -25,6 +25,16 @@ jobs:
           ./native-sample > actual-native.txt
           diff -u expected-native.txt actual-native.txt
           file native-sample
+      - name: Compile and run native collections and arithmetic (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo run -- --native examples/native_collections.lsn --output native-collections
+          ./native-collections > native-collections.out
+          printf 'مجموع القيم = 65\nعدد الحروف = 4\n5\n3\n1\nنجحت الاختبارات الأصلية\n' > expected-collections.out
+          diff -u expected-collections.out native-collections.out
+          cargo run -- --native examples/native_math.lsn --output native-math
+          ./native-math | grep -F 'لغة لسان 8'
       - name: Upload generated native Lisan sample (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
