@@ -25,3 +25,11 @@ pub fn check_native_file(path: impl AsRef<std::path::Path>) -> Result<(), String
 pub fn run(source: &str) -> Result<Vec<String>, String> {
     Interpreter::default().run_source(source)
 }
+
+pub mod checker;
+pub mod diagnostic;
+pub mod ffi;
+pub mod source;
+pub mod syntax;
+pub mod typed;
+pub mod types;

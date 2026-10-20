@@ -1,7 +1,8 @@
 [package]
 name = "lisan"
-version = "0.8.0"
+version = "0.9.0-preview.1"
 edition = "2021"
+rust-version = "1.75"
 license = "MIT"
 description = "لسان: نواة لغة برمجة عربية مكتوبة بلغة Rust"
 

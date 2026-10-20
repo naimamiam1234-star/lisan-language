@@ -4,30 +4,83 @@ use std::env;
 fn main() {
     let args: Vec<std::ffi::OsString> = env::args_os().skip(1).collect();
     if args.len() == 1 && (args[0] == "-h" || args[0] == "--help") {
-        println!("لسان {} | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn  يترجم إلى ملف آلة أصلي (الخيار الافتراضي)\n  lisan --interpret ملف.lsn  المسار القديم للتوافق فقط\n  lisan --check ملف.lsn  فحص قابلية توليد LLVM الأصلية دون Clang\n  lisan --check-legacy ملف.lsn  فحص القواعد والاستيرادات القديم\n  lisan --test ملف.lsn   تجميع وتشغيل برنامج أصلي مؤقت عبر Clang\n  lisan --test-legacy ملف.lsn   تشغيل التحققات بالمفسّر القديم\n  lisan --native ملف.lsn --output البرنامج  ترجمة إلى ملف آلة أصلي عبر Clang\n  lisan --emit-llvm ملف.lsn --output الملف.ll  إخراج LLVM IR\n  lisan --build ملف.lsn [--output الناتج]  الطريقة القديمة (تضم المفسّر)\n  lisan --tokens ملف.lsn  عرض الرموز\n  lisan --ast ملف.lsn  عرض شجرة بناء التعليمات\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 عرض تعليمات المترجم", env!("CARGO_PKG_VERSION"));
+        println!("لسان {} | لغة برمجة عربية\nالاستخدام:\n  lisan ملف.lsn  يترجم إلى ملف آلة أصلي (الخيار الافتراضي)\n  lisan --interpret ملف.lsn  المسار القديم للتوافق فقط\n  lisan --check ملف.lsn  فحص قابلية توليد LLVM الأصلية دون Clang\n  lisan --check-legacy ملف.lsn  فحص القواعد والاستيرادات القديم\n  lisan --test ملف.lsn   تجميع وتشغيل برنامج أصلي مؤقت عبر Clang\n  lisan --test-legacy ملف.lsn   تشغيل التحققات بالمفسّر القديم\n  lisan --native ملف.lsn --output البرنامج  ترجمة إلى ملف آلة أصلي عبر Clang\n  lisan --emit-object ملف.lsn --output الملف.o  مكتبة أصلية بلا main\n  lisan --native ملف.lsn --link مكتبة.o  ربط ملف أصلي أو غلاف C\n  lisan --emit-llvm ملف.lsn --output الملف.ll  إخراج LLVM IR\n  lisan --build ملف.lsn [--output الناتج]  الطريقة القديمة (تضم المفسّر)\n  lisan --tokens ملف.lsn  عرض الرموز\n  lisan --ast ملف.lsn  عرض شجرة بناء التعليمات\n  lisan -e 'اطبع(\"مرحبا\")؛'\n  lisan                 عرض تعليمات المترجم", env!("CARGO_PKG_VERSION"));
         return;
     }
     if args.len() == 1 && (args[0] == "-V" || args[0] == "--version") {
         println!("لسان {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    if args.len() >= 2 && (args[0] == "--native" || args[0] == "--emit-llvm") {
-        if args.len() != 2 && !(args.len() == 4 && args[2] == "--output") {
-            eprintln!("الاستخدام: lisan --native ملف.lsn [--output الناتج]، أو --emit-llvm");
-            std::process::exit(2);
-        }
+    if args.len() >= 2
+        && (args[0] == "--native" || args[0] == "--emit-llvm" || args[0] == "--emit-object")
+    {
         let input = std::path::Path::new(&args[1]);
-        let default_name = if args[0] == "--emit-llvm" { "program.ll" }
-                           else if cfg!(windows) { "program.exe" } else { "program" };
-        let target = if args.len() == 4 { std::path::Path::new(&args[3]) } else { std::path::Path::new(default_name) };
-        let result = if args[0] == "--emit-llvm" {
-            lisan::native::emit_file(input).and_then(|ir| lisan::native::save_ir(&ir, input, target))
+        let emit_ir = args[0] == "--emit-llvm";
+        let mut options = lisan::native::NativeBuildOptions::default();
+        if args[0] == "--emit-object" {
+            options.emit = lisan::native::NativeEmit::Object;
+        }
+        let default_name = if emit_ir {
+            "program.ll"
+        } else if args[0] == "--emit-object" {
+            if cfg!(windows) {
+                "program.obj"
+            } else {
+                "program.o"
+            }
+        } else if cfg!(windows) {
+            "program.exe"
         } else {
-            lisan::native::build_native(input, target)
+            "program"
+        };
+        let mut output = None;
+        let mut index = 2;
+        while index < args.len() {
+            if index + 1 == args.len() {
+                native_usage();
+            }
+            let value = &args[index + 1];
+            if args[index] == "--output" {
+                if output.is_some() {
+                    native_usage();
+                }
+                output = Some(std::path::PathBuf::from(value));
+            } else if args[index] == "--link"
+                && !emit_ir
+                && options.emit == lisan::native::NativeEmit::Executable
+            {
+                options.link_inputs.push(value.into());
+            } else if args[index] == "--library-path"
+                && !emit_ir
+                && options.emit == lisan::native::NativeEmit::Executable
+            {
+                options.library_paths.push(value.into());
+            } else if args[index] == "--library"
+                && !emit_ir
+                && options.emit == lisan::native::NativeEmit::Executable
+            {
+                let name = value
+                    .to_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| native_usage());
+                options.libraries.push(name.to_string());
+            } else {
+                native_usage();
+            }
+            index += 2;
+        }
+        let output = output.unwrap_or_else(|| default_name.into());
+        let result = if emit_ir {
+            lisan::native::emit_ir_file(input, &output)
+        } else {
+            lisan::native::build_native_with_options(input, &output, &options)
         };
         match result {
             Ok(path) => println!("نجحت الترجمة الأصلية: {}", path.display()),
-            Err(error) => { eprintln!("خطأ في الترجمة الأصلية: {}",error); std::process::exit(1); }
+            Err(error) => {
+                eprintln!("خطأ في الترجمة الأصلية: {}", error);
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -40,28 +93,46 @@ fn main() {
             eprintln!("الاستخدام: lisan --build ملف.lsn [--output الناتج]");
             std::process::exit(2);
         }
-        let target = if args.len() == 4 { Some(std::path::Path::new(&args[3])) } else { None };
+        let target = if args.len() == 4 {
+            Some(std::path::Path::new(&args[3]))
+        } else {
+            None
+        };
         match lisan::bundle::build_executable(std::path::Path::new(&args[1]), target) {
             Ok(path) => println!("أُنشئ البرنامج المستقل: {}", path.display()),
-            Err(err) => { eprintln!("خطأ في البناء: {}", err); std::process::exit(1); }
+            Err(err) => {
+                eprintln!("خطأ في البناء: {}", err);
+                std::process::exit(1);
+            }
         }
         return;
     }
     if args.len() == 2 && (args[0] == "--tokens" || args[0] == "--ast") {
         let source = match std::fs::read_to_string(&args[1]) {
             Ok(text) => text,
-            Err(err) => { eprintln!("تعذّرت قراءة الملف: {}", err); std::process::exit(1); }
+            Err(err) => {
+                eprintln!("تعذّرت قراءة الملف: {}", err);
+                std::process::exit(1);
+            }
         };
         let tokens = match lisan::lexer::tokenize(&source) {
             Ok(tokens) => tokens,
-            Err(err) => { eprintln!("خطأ: {}", err); std::process::exit(1); }
+            Err(err) => {
+                eprintln!("خطأ: {}", err);
+                std::process::exit(1);
+            }
         };
         if args[0] == "--tokens" {
-            for token in tokens { println!("{}:{} {:?}", token.line, token.column, token.kind); }
+            for token in tokens {
+                println!("{}:{} {:?}", token.line, token.column, token.kind);
+            }
         } else {
             match lisan::parser::parse(tokens) {
                 Ok(ast) => println!("{:#?}", ast),
-                Err(err) => { eprintln!("خطأ: {}", err); std::process::exit(1); }
+                Err(err) => {
+                    eprintln!("خطأ: {}", err);
+                    std::process::exit(1);
+                }
             }
         }
         return;
@@ -78,7 +149,10 @@ fn main() {
     if args.len() == 2 && args[0] == "--test-legacy" {
         match Interpreter::default().run_file(&args[1]) {
             Ok(_) => println!("نجحت اختبارات لسان"),
-            Err(err) => { eprintln!("فشلت اختبارات لسان: {}", err); std::process::exit(1); }
+            Err(err) => {
+                eprintln!("فشلت اختبارات لسان: {}", err);
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -89,8 +163,18 @@ fn main() {
             check_file(&args[1])
         };
         match result {
-            Ok(()) => println!("نجح فحص ملفات لسان ({})", if args[0] == "--check" { "native LLVM" } else { "legacy" }),
-            Err(err) => { eprintln!("خطأ: {}", err); std::process::exit(1); }
+            Ok(()) => println!(
+                "نجح فحص ملفات لسان ({})",
+                if args[0] == "--check" {
+                    "native LLVM"
+                } else {
+                    "legacy"
+                }
+            ),
+            Err(err) => {
+                eprintln!("خطأ: {}", err);
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -107,18 +191,32 @@ fn main() {
     }
     if args.len() == 2 && args[0] == "--interpret" {
         match Interpreter::default().run_file(&args[1]) {
-            Ok(lines) => for output in lines { println!("{}", output); },
-            Err(err) => { eprintln!("خطأ: {}", err); std::process::exit(1); }
+            Ok(lines) => {
+                for output in lines {
+                    println!("{}", output);
+                }
+            }
+            Err(err) => {
+                eprintln!("خطأ: {}", err);
+                std::process::exit(1);
+            }
         }
         return;
     }
-    if args.len() == 1 && std::path::Path::new(&args[0]).extension() == Some(std::ffi::OsStr::new("lsn")) {
+    if args.len() == 1
+        && std::path::Path::new(&args[0]).extension() == Some(std::ffi::OsStr::new("lsn"))
+    {
         let source = std::path::Path::new(&args[0]);
         let mut name = source.file_stem().unwrap().to_os_string();
-        if cfg!(windows) { name.push(".exe"); }
+        if cfg!(windows) {
+            name.push(".exe");
+        }
         match lisan::native::build_native(source, std::path::Path::new(&name)) {
             Ok(path) => println!("أُنشئ الملف التنفيذي الأصلي: {}", path.display()),
-            Err(error) => { eprintln!("خطأ في الترجمة الأصلية: {}", error); std::process::exit(1); }
+            Err(error) => {
+                eprintln!("خطأ في الترجمة الأصلية: {}", error);
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -129,13 +227,24 @@ fn main() {
     println!("لسان: مترجم عربي أصلي. الاستخدام: lisan ملف.lsn أو lisan --native ملف.lsn --output البرنامج");
 }
 
-fn execute(interpreter: &mut Interpreter, source: &str) {
-    match interpreter.run_source(source) {
-        Ok(lines) => for output in lines { println!("{}", output); },
-        Err(err) => { eprintln!("خطأ: {}", err); std::process::exit(1); },
-    }
+fn native_usage() -> ! {
+    eprintln!("الاستخدام: lisan --native ملف.lsn [--output الناتج] [--link ملف.o] [--library اسم] [--library-path مجلد]؛ أو --emit-llvm/--emit-object ملف.lsn [--output الناتج]");
+    std::process::exit(2)
 }
 
+fn execute(interpreter: &mut Interpreter, source: &str) {
+    match interpreter.run_source(source) {
+        Ok(lines) => {
+            for output in lines {
+                println!("{}", output);
+            }
+        }
+        Err(err) => {
+            eprintln!("خطأ: {}", err);
+            std::process::exit(1);
+        }
+    }
+}
 
 /// An exclusively created directory. Unix permissions keep generated executables private.
 struct TestDirectory(std::path::PathBuf);
@@ -151,14 +260,18 @@ impl TestDirectory {
         for _ in 0..128 {
             let path = env::temp_dir().join(format!(
                 "lisan-native-test-{}-{}-{}",
-                std::process::id(), timestamp, NEXT.fetch_add(1, Ordering::Relaxed)
+                std::process::id(),
+                timestamp,
+                NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            let mut builder = std::fs::DirBuilder::new();
+            let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             match builder.create(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -178,9 +291,15 @@ impl Drop for TestDirectory {
 fn test_native_file(source: &std::path::Path) -> Result<std::process::ExitStatus, String> {
     let directory = TestDirectory::create()?;
     // Resolve the private directory so even a relative TMPDIR never invokes PATH lookup.
-    let base = directory.0.canonicalize()
+    let base = directory
+        .0
+        .canonicalize()
         .map_err(|error| format!("تعذر تحديد مسار مجلد الاختبار: {}", error))?;
-    let executable = base.join(if cfg!(windows) { "program.exe" } else { "program" });
+    let executable = base.join(if cfg!(windows) {
+        "program.exe"
+    } else {
+        "program"
+    });
     lisan::native::build_native(source, &executable)?;
     std::process::Command::new(&executable)
         .status()
