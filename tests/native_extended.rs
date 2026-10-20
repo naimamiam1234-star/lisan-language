@@ -31,15 +31,24 @@ fn native_rejects_unsupported_nested_maps(){
     let err=compile_ir("ليكن س = {\"مفتاح\": 5}؛").unwrap_err();
     assert!(err.contains("لم تُنفّذ"));
 }
-#[cfg(target_os="linux")]
 #[test]
 fn native_collections_binary_executes_without_interpreter(){
-    if std::process::Command::new("clang").arg("--version").output().is_err(){return;}
     let source=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/native_collections.lsn");
-    let target=std::env::temp_dir().join(format!("lisan-collections-{}",std::process::id()));
+    let target=std::env::temp_dir().join(format!("lisan-collections-{}{}",std::process::id(),std::env::consts::EXE_SUFFIX));
     native::build_native(&source,&target).unwrap();
     let process=std::process::Command::new(&target).output().unwrap();
     let _=std::fs::remove_file(&target);
     assert!(process.status.success(),"{}",String::from_utf8_lossy(&process.stderr));
-    assert_eq!(String::from_utf8_lossy(&process.stdout),"مجموع القيم = 65\nعدد الحروف = 4\n5\n3\n1\nنجحت الاختبارات الأصلية\n");
+    assert_eq!(String::from_utf8_lossy(&process.stdout).replace("\r\n", "\n"),"مجموع القيم = 65\nعدد الحروف = 4\n5\n3\n1\nنجحت الاختبارات الأصلية\n");
+}
+
+#[test]
+fn native_math_binary_executes_without_interpreter() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/native_math.lsn");
+    let target = std::env::temp_dir().join(format!("lisan-math-{}{}", std::process::id(), std::env::consts::EXE_SUFFIX));
+    native::build_native(&source, &target).unwrap();
+    let process = std::process::Command::new(&target).output().unwrap();
+    let _ = std::fs::remove_file(&target);
+    assert!(process.status.success(), "{}", String::from_utf8_lossy(&process.stderr));
+    assert_eq!(String::from_utf8(process.stdout).unwrap().replace("\r\n", "\n"), "9\n9\n3\n3\n8\nلغة لسان 8\n");
 }

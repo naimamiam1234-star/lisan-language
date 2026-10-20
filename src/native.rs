@@ -1,10 +1,10 @@
 //! Native (ahead-of-time) compiler: Lisan AST -> LLVM IR -> machine code via Clang.
 //! The emitted executable never includes the Rust interpreter or serialized AST.
 use crate::ast::{Expr, Function, Op, Stmt};
+mod build;
+pub use build::compile_ir;
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Type { Number, Boolean, Text, NumberList }
@@ -83,6 +83,14 @@ impl<'a> FunctionWriter<'a> {
         self.instruction("unreachable");self.terminated=true;
         self.label(&ok);
     }
+    fn require_finite(&mut self, operand: &str) {
+        self.module.intrinsics.insert("fabs".into());
+        let magnitude = self.new_reg();
+        self.instruction(format!("{} = call double @llvm.fabs.f64(double {})", magnitude, operand));
+        let valid = self.new_reg();
+        self.instruction(format!("{} = fcmp ole double {}, 0x7FEFFFFFFFFFFFFF", valid, magnitude));
+        self.reject_unless(valid, "خطأ: نتيجة العملية غير منتهية أو خارج النطاق");
+    }
     fn list_length_and_data(&mut self,list:&Value)->(String,String) {
         let len=self.new_reg();self.instruction(format!("{} = extractvalue {{ i64, ptr }} {}, 0",len,list.operand));
         let ptr=self.new_reg();self.instruction(format!("{} = extractvalue {{ i64, ptr }} {}, 1",ptr,list.operand));
@@ -152,30 +160,52 @@ impl<'a> FunctionWriter<'a> {
     fn for_range(&mut self,name:&str,args:&[Expr],body:&[Stmt])->Result<(),String>{
         if !(1..=3).contains(&args.len()){return Err("مدى تقبل من معامل إلى ثلاثة".into());}
         let mut params=Vec::new();
-        for arg in args {let v=self.generate_expr(arg)?;self.requires(&v,Type::Number,"معامل مدى")?;params.push(v.operand);}
+        self.module.intrinsics.insert("fabs".into());
+        self.module.intrinsics.insert("ceil".into());
+        for arg in args {
+            let v=self.generate_expr(arg)?; self.requires(&v,Type::Number,"معامل مدى")?;
+            let integral=self.new_reg();
+            self.instruction(format!("{} = call double @llvm.floor.f64(double {})",integral,v.operand));
+            let is_int=self.new_reg();
+            self.instruction(format!("{} = fcmp oeq double {}, {}",is_int,v.operand,integral));
+            let magnitude=self.new_reg();
+            self.instruction(format!("{} = call double @llvm.fabs.f64(double {})",magnitude,v.operand));
+            let in_range=self.new_reg();
+            self.instruction(format!("{} = fcmp ole double {}, 0x433FFFFFFFFFFFFF",in_range,magnitude));
+            let valid=self.new_reg();self.instruction(format!("{} = and i1 {}, {}",valid,is_int,in_range));
+            self.reject_unless(valid,"مدى تتطلب أعدادًا صحيحة دقيقة ضمن النطاق المسموح");
+            params.push(v.operand);
+        }
         let (start,end,step)=match params.len(){1=>("0.0".to_string(),params[0].clone(),"1.0".to_string()),2=>(params[0].clone(),params[1].clone(),"1.0".to_string()),_=>(params[0].clone(),params[1].clone(),params[2].clone())};
-        let step_good=self.new_reg();self.instruction(format!("{} = fcmp une double {}, 0.0",step_good,step));
+        let step_good=self.new_reg();self.instruction(format!("{} = fcmp one double {}, 0.0",step_good,step));
         self.reject_unless(step_good,"خطأ: خطوة مدى لا يجوز أن تكون صفرًا");
-        let ptr=self.new_reg();self.entry_alloca(format!("{} = alloca double",ptr));
-        self.instruction(format!("store double {}, ptr {}",start,ptr));
+        let distance=self.new_reg();self.instruction(format!("{} = fsub double {}, {}",distance,end,start));
+        let quotient=self.new_reg();self.instruction(format!("{} = fdiv double {}, {}",quotient,distance,step));
+        let ceil=self.new_reg();self.instruction(format!("{} = call double @llvm.ceil.f64(double {})",ceil,quotient));
+        let positive=self.new_reg();self.instruction(format!("{} = fcmp ogt double {}, 0.0",positive,quotient));
+        let count_float=self.new_reg();self.instruction(format!("{} = select i1 {}, double {}, double 0.0",count_float,positive,ceil));
+        let bounded=self.new_reg();self.instruction(format!("{} = fcmp ole double {}, 1.000000e5",bounded,count_float));
+        self.reject_unless(bounded,"مدى تجاوز الحد الأقصى للقائمة");
+        let count=self.new_reg();self.instruction(format!("{} = fptoui double {} to i64",count,count_float));
+        let ptr=self.new_reg();self.entry_alloca(format!("{} = alloca i64",ptr));
+        self.instruction(format!("store i64 0, ptr {}",ptr));
         let cond=self.new_label("range.cond");let body_label=self.new_label("range.body");
         let step_label=self.new_label("range.step");let done=self.new_label("range.end");
         self.branch(&cond);self.label(&cond);
-        let current=self.new_reg();self.instruction(format!("{} = load double, ptr {}",current,ptr));
-        let upwards=self.new_reg();self.instruction(format!("{} = fcmp ogt double {}, 0.0",upwards,step));
-        let less=self.new_reg();self.instruction(format!("{} = fcmp olt double {}, {}",less,current,end));
-        let greater=self.new_reg();self.instruction(format!("{} = fcmp ogt double {}, {}",greater,current,end));
-        let active=self.new_reg();self.instruction(format!("{} = select i1 {}, i1 {}, i1 {}",active,upwards,less,greater));
+        let index=self.new_reg();self.instruction(format!("{} = load i64, ptr {}",index,ptr));
+        let active=self.new_reg();self.instruction(format!("{} = icmp ult i64 {}, {}",active,index,count));
         self.instruction(format!("br i1 {}, label %{}, label %{}",active,body_label,done));self.terminated=true;
         self.label(&body_label);
+        let position=self.new_reg();self.instruction(format!("{} = uitofp i64 {} to double",position,index));
+        let offset=self.new_reg();self.instruction(format!("{} = fmul double {}, {}",offset,position,step));
+        let current=self.new_reg();self.instruction(format!("{} = fadd double {}, {}",current,start,offset));
         self.loops.push(LoopTarget{continue_label:step_label.clone(),break_label:done.clone()});
         let r=self.scope(|this|{this.register(name,Value{ty:Type::Number,operand:current})?;this.statements(body)});
         self.loops.pop();r?;
         if !self.terminated{self.branch(&step_label);}
         self.label(&step_label);
-        let saved=self.new_reg();self.instruction(format!("{} = load double, ptr {}",saved,ptr));
-        let next=self.new_reg();self.instruction(format!("{} = fadd double {}, {}",next,saved,step));
-        self.instruction(format!("store double {}, ptr {}",next,ptr));
+        let next=self.new_reg();self.instruction(format!("{} = add i64 {}, 1",next,index));
+        self.instruction(format!("store i64 {}, ptr {}",next,ptr));
         self.branch(&cond);self.label(&done);Ok(())
     }
     fn generate_expr(&mut self, e:&Expr)->Result<Value,String> {
@@ -275,6 +305,11 @@ impl<'a> FunctionWriter<'a> {
                     return Ok(Value{ty:Type::Boolean,operand:out});
                 }
                 if a.ty!=b.ty {return Err("لا يجوز خلط الأنواع في العملية الثنائية".into());}
+                if a.ty == Type::Number && matches!(op, Op::Divide | Op::Modulo) {
+                    let valid = self.new_reg();
+                    self.instruction(format!("{} = fcmp one double {}, 0.0", valid, b.operand));
+                    self.reject_unless(valid, "خطأ: قسمة أو باقي قسمة على صفر");
+                }
                 let (cmd,out_ty) = match op {
                     Op::Add if a.ty==Type::Number => ("fadd",Type::Number),
                     Op::Subtract if a.ty==Type::Number => ("fsub",Type::Number),
@@ -285,6 +320,7 @@ impl<'a> FunctionWriter<'a> {
                         let reg=self.new_reg();
                         self.instruction(format!("{} = call double @llvm.pow.f64(double {}, double {})",reg,a.operand,b.operand));
                         self.module.needs_pow=true;
+                        self.require_finite(&reg);
                         return Ok(Value{ty:Type::Number,operand:reg});
                     }
                     Op::Less if a.ty==Type::Number => ("fcmp olt",Type::Boolean),
@@ -299,6 +335,7 @@ impl<'a> FunctionWriter<'a> {
                 };
                 let reg=self.new_reg();
                 self.instruction(format!("{} = {} {} {}, {}",reg,cmd,a.ty.llvm(),a.operand,b.operand));
+                if out_ty == Type::Number { self.require_finite(&reg); }
                 Ok(Value{ty:out_ty,operand:reg})
             }
             Expr::Call(name,args)=>{
@@ -467,7 +504,7 @@ pub fn generate_llvm(stmts:&[Stmt])->Result<String,String>{
     let main_ir=format!("define i32 @main() {{\n{}\n}}",writer.lines.join("\n"));
     let mut ir=String::from("; Native Lisan: source language compiled to LLVM IR, not interpreted\nsource_filename = \"lisan_native\"\n\n");
     ir.push_str("declare i32 @puts(ptr)\ndeclare i32 @printf(ptr, ...)\ndeclare i32 @snprintf(ptr, i64, ptr, ...)\ndeclare ptr @malloc(i64)\ndeclare ptr @strcpy(ptr, ptr)\ndeclare ptr @strcat(ptr, ptr)\ndeclare i64 @strlen(ptr)\ndeclare i32 @strcmp(ptr, ptr)\ndeclare void @exit(i32)\ndeclare double @llvm.floor.f64(double)\n");
-    for intrinsic in ["fabs","sqrt","round"] {if module.intrinsics.contains(intrinsic){ir.push_str(&format!("declare double @llvm.{}.f64(double)\n",intrinsic));}}
+    for intrinsic in ["fabs","sqrt","round","ceil"] {if module.intrinsics.contains(intrinsic){ir.push_str(&format!("declare double @llvm.{}.f64(double)\n",intrinsic));}}
     if module.needs_pow {ir.push_str("declare double @llvm.pow.f64(double, double)\n");}
     // UTF-8 length counts Unicode scalar values, not bytes.
     ir.push_str("define i64 @lisan_utf8_len(ptr %str) {\nentry:\n  br label %loop\nloop:\n  %p = phi ptr [ %str, %entry ], [ %next, %body ]\n  %count = phi i64 [ 0, %entry ], [ %add, %body ]\n  %byte = load i8, ptr %p\n  %end = icmp eq i8 %byte, 0\n  br i1 %end, label %done, label %body\nbody:\n  %mask = and i8 %byte, -64\n  %continuation = icmp eq i8 %mask, -128\n  %increment = zext i1 %continuation to i64\n  %amount = sub i64 1, %increment\n  %add = add i64 %count, %amount\n  %next = getelementptr i8, ptr %p, i64 1\n  br label %loop\ndone:\n  ret i64 %count\n}\n");
@@ -497,16 +534,7 @@ pub fn emit_file(path:&Path)->Result<String,String>{
 /// Clang is used as the LLVM assembler/code generator and system linker.
 pub fn build_native(source:&Path,output:&Path)->Result<PathBuf,String>{
     let ir=emit_file(source)?;
-    let destination=if output.is_absolute(){output.to_path_buf()} else {std::env::current_dir().map_err(|e|e.to_string())?.join(output)};
-    let parent=destination.parent().ok_or("مسار الناتج غير صالح")?;
-    fs::create_dir_all(parent).map_err(|e|format!("تعذر إعداد مجلد الناتج: {}",e))?;
-    let temporary=parent.join(format!(".lisan-ir-{}-{}.ll",std::process::id(),destination.file_name().unwrap().to_string_lossy()));
-    fs::write(&temporary,ir).map_err(|e|format!("تعذر كتابة LLVM IR: {}",e))?;
-    let command=Command::new("clang").arg("-x").arg("ir").arg(&temporary).arg("-O2").arg("-o").arg(&destination).arg("-lm").output();
-    let _=fs::remove_file(&temporary);
-    let result=command.map_err(|e|format!("تعذر تشغيل Clang؛ ثبّت clang وأضفه إلى PATH: {}",e))?;
-    if !result.status.success(){return Err(format!("فشلت الترجمة الأصلية: {}",String::from_utf8_lossy(&result.stderr)));}
-    Ok(destination)
+    compile_ir(&ir, source, output)
 }
 
 #[cfg(test)]
