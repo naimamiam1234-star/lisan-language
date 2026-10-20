@@ -33,6 +33,29 @@ fn compiler_override_failure_preserves_previous_output() {
     assert_eq!(fs::read_dir(&w.0).unwrap().count(), 2);
 }
 
+#[test]
+fn emit_llvm_never_overwrites_its_source() {
+    let w = Workspace::new();
+    let source = w.0.join("input.lsn");
+    let before = fs::read(&source).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_lisan"))
+        .arg("--emit-llvm").arg(&source).arg("--output").arg(&source).output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(fs::read(source).unwrap(), before);
+}
+
+#[test]
+fn linker_failure_preserves_previous_output_and_cleans_build_directory() {
+    let w = Workspace::new();
+    let output = w.0.join(format!("program{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&output, b"previous build").unwrap();
+    let ir = "declare void @lisan_missing_link_symbol()\ndefine i32 @main() {\ncall void @lisan_missing_link_symbol()\nret i32 0\n}\n";
+    let error = lisan::native::compile_ir(ir, &w.0.join("input.lsn"), &output).unwrap_err();
+    assert!(error.contains("فشلت الترجمة الأصلية"), "{error}");
+    assert_eq!(fs::read(output).unwrap(), b"previous build");
+    assert_eq!(fs::read_dir(&w.0).unwrap().count(), 2);
+}
+
 #[cfg(unix)]
 #[test]
 fn predictable_old_temporary_symlink_is_never_followed() {

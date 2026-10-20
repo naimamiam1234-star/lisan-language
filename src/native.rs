@@ -2,7 +2,7 @@
 //! The emitted executable never includes the Rust interpreter or serialized AST.
 use crate::ast::{Expr, Function, Op, Stmt};
 mod build;
-pub use build::compile_ir;
+pub use build::{compile_ir, save_ir};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

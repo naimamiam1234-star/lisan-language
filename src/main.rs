@@ -21,10 +21,7 @@ fn main() {
                            else if cfg!(windows) { "program.exe" } else { "program" };
         let target = if args.len() == 4 { std::path::Path::new(&args[3]) } else { std::path::Path::new(default_name) };
         let result = if args[0] == "--emit-llvm" {
-            lisan::native::emit_file(input).and_then(|ir| {
-                std::fs::write(target, ir).map_err(|e| format!("تعذر حفظ LLVM IR: {}",e))?;
-                Ok(target.to_path_buf())
-            })
+            lisan::native::emit_file(input).and_then(|ir| lisan::native::save_ir(&ir, input, target))
         } else {
             lisan::native::build_native(input, target)
         };
