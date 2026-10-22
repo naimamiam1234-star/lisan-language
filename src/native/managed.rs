@@ -4,7 +4,7 @@ fn err(span: Span) -> Diagnostic {
     Diagnostic::new(
         "E_NATIVE_TEXT",
         span,
-        "النص المدار متاح في المستوى الأعلى والكتل المباشرة فقط؛ نوع أو سياق نص غير مدعوم",
+        "النص المدار متاح في المستوى الأعلى فقط؛ نوع أو سياق نص غير مدعوم",
     )
 }
 fn contains(t: &Type) -> bool {
@@ -68,6 +68,11 @@ fn expr(e: &TypedExpr, allowed: bool) -> Result<(), Diagnostic> {
             expr(b, allowed)?;
         }
         Binary(a, op, b) => {
+            if matches!(op, Op::And | Op::Or)
+                && (a.ty != Type::Bool || b.ty != Type::Bool || e.ty != Type::Bool)
+            {
+                return Err(err(e.span));
+            }
             if e.ty == Type::Text || a.ty == Type::Text || b.ty == Type::Text {
                 let result = if matches!(op, Op::Equal | Op::NotEqual) {
                     Type::Bool
@@ -80,9 +85,8 @@ fn expr(e: &TypedExpr, allowed: bool) -> Result<(), Diagnostic> {
                     return Err(err(e.span));
                 }
             }
-            let nested = allowed && !matches!(op, Op::And | Op::Or);
-            expr(a, nested)?;
-            expr(b, nested)?;
+            expr(a, allowed)?;
+            expr(b, allowed)?;
         }
         Assign(_, a) => {
             if e.ty != a.ty {
@@ -133,15 +137,21 @@ fn stmts(body: &[TypedStmt], allowed: bool) -> Result<(), Diagnostic> {
             Print(e) | Expr(e) => expr(e, allowed)?,
             Block(b) => stmts(b, allowed)?,
             If(c, a, b) => {
-                expr(c, false)?;
-                stmts(a, false)?;
+                if c.ty != Type::Bool {
+                    return Err(err(c.span));
+                }
+                expr(c, allowed)?;
+                stmts(a, allowed)?;
                 if let Some(b) = b {
-                    stmts(b, false)?;
+                    stmts(b, allowed)?;
                 }
             }
             While(c, b) => {
-                expr(c, false)?;
-                stmts(b, false)?;
+                if c.ty != Type::Bool {
+                    return Err(err(c.span));
+                }
+                expr(c, allowed)?;
+                stmts(b, allowed)?;
             }
             Return(Some(e)) => expr(e, false)?,
             _ => {}
@@ -253,6 +263,10 @@ pub fn uses_runtime(p: &TypedProgram) -> bool {
             TypedStmtKind::Print(e) | TypedStmtKind::Expr(e) => text(e),
             TypedStmtKind::Let { value, .. } => text(value),
             TypedStmtKind::Block(b) => body(b),
+            TypedStmtKind::If(c, a, b) => {
+                text(c) || body(a) || b.as_ref().map_or(false, |b| body(b))
+            }
+            TypedStmtKind::While(c, b) => text(c) || body(b),
             _ => false,
         })
     }

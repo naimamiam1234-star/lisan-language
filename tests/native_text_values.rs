@@ -52,12 +52,7 @@ fn bad_indices_are_located() {
 }
 #[test]
 fn prohibited_contexts() {
-    for source in [
-        "دالة س(): ط64 { أرجع طول(\"أ\")؛ }",
-        "متغير س: نص = \"أ\"؛ إذا (طول(س) == 1) { اطبع(1)؛ }",
-        "متغير س: نص = \"أ\"؛ اطبع(صحيح و (طول(س) == 1))؛",
-        "متغير س: نص = \"أ\"؛ بينما (خطأ) { اطبع(طول(س))؛ }",
-    ] {
+    for source in ["دالة س(): ط64 { أرجع طول(\"أ\")؛ }"] {
         let mut map = lisan::source::SourceMap::default();
         let id = map.add("test.lsn", source);
         let toks = lisan::lexer::tokenize_located(source, id).unwrap();
@@ -195,8 +190,6 @@ fn unsupported_text_types_and_nested_contexts() {
         "متغير س: مؤشر<نص> = مؤشر_فارغ<نص>()؛",
         "متغير س: نص = \"أ\"؛ اطبع(1 + س)؛",
         "متغير س: نص = \"أ\"؛ اطبع(س[صحيح])؛",
-        "متغير س: نص = \"أ\"؛ إذا (صحيح) { متغير ص: ط64 = طول(س) + 1؛ }",
-        "متغير س: نص = \"أ\"؛ اطبع(خطأ أو (1 == طول(س)))؛",
     ] {
         let tokens = lisan::lexer::tokenize_located(source, lisan::source::SourceId(0)).unwrap();
         let p = lisan::parser::parse_located(tokens).unwrap();
@@ -206,7 +199,6 @@ fn unsupported_text_types_and_nested_contexts() {
 #[test]
 fn direct_ir_cannot_bypass_managed_structural_validation() {
     use lisan::{
-        ast::Op,
         source::Span,
         typed::*,
         types::{Abi, FunctionSig, Type},
@@ -232,21 +224,26 @@ fn direct_ir_cannot_bypass_managed_structural_validation() {
     let stmt = |kind| TypedStmt { kind, span };
     let mut programs = vec![];
     programs.push(TypedProgram {
-        main: vec![stmt(TypedStmtKind::If(
-            TypedExpr {
-                kind: TypedExprKind::Binary(
-                    Box::new(length.clone()),
-                    Op::Equal,
-                    Box::new(length.clone()),
-                ),
-                ty: Type::Bool,
-                span,
-            },
-            vec![],
-            None,
-        ))],
+        main: vec![stmt(TypedStmtKind::If(text.clone(), vec![], None))],
         ..Default::default()
     });
+    programs.push(TypedProgram {
+        main: vec![stmt(TypedStmtKind::While(text.clone(), vec![]))],
+        ..Default::default()
+    });
+    programs.push(TypedProgram {
+        main: vec![stmt(TypedStmtKind::Expr(TypedExpr {
+            kind: TypedExprKind::Binary(
+                Box::new(length.clone()),
+                lisan::ast::Op::And,
+                Box::new(length.clone()),
+            ),
+            ty: Type::Bool,
+            span,
+        }))],
+        ..Default::default()
+    });
+
     programs.push(TypedProgram {
         main: vec![stmt(TypedStmtKind::Print(TypedExpr {
             kind: TypedExprKind::Bool(true),
@@ -303,37 +300,6 @@ fn direct_ir_cannot_bypass_managed_structural_validation() {
             },
             span,
         }],
-        ..Default::default()
-    });
-    programs.push(TypedProgram {
-        main: vec![stmt(TypedStmtKind::While(
-            TypedExpr {
-                kind: TypedExprKind::Bool(false),
-                ty: Type::Bool,
-                span,
-            },
-            vec![stmt(TypedStmtKind::Expr(text.clone()))],
-        ))],
-        ..Default::default()
-    });
-    programs.push(TypedProgram {
-        main: vec![stmt(TypedStmtKind::Print(TypedExpr {
-            kind: TypedExprKind::Binary(
-                Box::new(TypedExpr {
-                    kind: TypedExprKind::Bool(false),
-                    ty: Type::Bool,
-                    span,
-                }),
-                Op::And,
-                Box::new(TypedExpr {
-                    kind: TypedExprKind::Binary(Box::new(text.clone()), Op::Equal, Box::new(text)),
-                    ty: Type::Bool,
-                    span,
-                }),
-            ),
-            ty: Type::Bool,
-            span,
-        }))],
         ..Default::default()
     });
     for p in programs {
@@ -560,4 +526,102 @@ fn direct_ir_rejects_nontext_binary_operands_with_text_result() {
         let diagnostics = lisan::native::typed_codegen::generate(&program).unwrap_err();
         assert_eq!(diagnostics[0].primary, span);
     }
+}
+
+#[test]
+fn control_flow_releases_conditions_and_loop_scopes() {
+    let source = "خارجي دالة تحقق(س: ط64): فراغ = \"check_live\"؛ متغير أ: نص = \"أ🙂\"؛ متغير ع: ص32 = 0؛ بينما (طول(أ + \"\") == 2 و ع < 100000) { متغير ب: نص = أ + \"ب\"؛ غير_آمن { تحقق(2)؛ } ع = ع + 1؛ إذا (ع < 99999) { متغير ج: نص = \"x\"؛ تابع؛ } إذا (ع == 100000) { متغير ج: نص = \"y\"؛ توقف؛ } } غير_آمن { تحقق(1)؛ } اطبع(أ)؛";
+    let p = Instrumented::new(source);
+    let o = p.run(0);
+    assert!(o.status.success(), "{o:?}");
+    assert_clean(&o);
+    assert_eq!(
+        String::from_utf8(o.stdout).unwrap().replace("\r\n", "\n"),
+        "أ🙂\n"
+    );
+}
+
+#[test]
+fn control_flow_short_circuit_and_nested_runtime_discovery() {
+    let o = run("متغير س: نص = \"a\"؛ إذا (طول(\"🙂\") == 1) { اطبع(\"أ\" + \"ب\")؛ } وإلا { اطبع(\"bad\")؛ } اطبع(خطأ و (طول(س[9]) == 1))؛ اطبع(صحيح أو (طول(س[9]) == 1))؛ بينما (خطأ) { اطبع(\"x\" + \"y\")؛ }");
+    assert!(o.status.success(), "{o:?}");
+    assert_eq!(
+        String::from_utf8(o.stdout).unwrap().replace("\r\n", "\n"),
+        "أب\nخطأ\nصحيح\n"
+    );
+}
+
+#[test]
+fn finite_nested_loops_preserve_outer_slots_and_cleanup_every_oom() {
+    let p = Instrumented::new("خارجي دالة تحقق(س: ط64): فراغ = \"check_live\"؛ متغير أ: نص = \"أ\"؛ متغير ع: ص32 = 0؛ بينما (ع < 3 و طول(أ + \"\") == 1) { متغير ب: نص = \"🙂\"؛ متغير د: ص32 = 0؛ بينما (د < 3) { متغير ج: نص = ب + أ؛ د = د + 1؛ { متغير ك: نص = \"z\"؛ إذا (د == 1) { تابع؛ } إذا (د == 2) { توقف؛ } } } غير_آمن { تحقق(2)؛ } أ = أ[0]؛ ع = ع + 1؛ } غير_آمن { تحقق(1)؛ } اطبع(أ)؛");
+    let good = p.run(0);
+    assert!(good.status.success(), "{good:?}");
+    assert_clean(&good);
+    let calls: usize = String::from_utf8_lossy(&good.stderr)
+        .split("CALLS=")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(calls > 15);
+    for fail in 1..=calls {
+        let o = p.run(fail);
+        assert_eq!(o.status.code(), Some(1), "fail={fail} {o:?}");
+        assert_clean(&o);
+    }
+}
+
+#[test]
+fn skipped_rhs_does_not_allocate_and_selected_rhs_failure_cleans() {
+    let p = Instrumented::new("خارجي دالة تحقق(س: ط64): فراغ = \"check_live\"؛ متغير أ: نص = \"a\"؛ اطبع(خطأ و (طول(أ + \"b\") == 2))؛ اطبع(صحيح أو (طول(أ[9]) == 1))؛ غير_آمن { تحقق(1)؛ }");
+    let o = p.run(2);
+    assert!(o.status.success(), "{o:?}");
+    assert_clean(&o);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("CALLS=1"));
+    for source in [
+        "متغير أ: نص = \"a\"؛\nبينما (طول(أ[3]) == 1) { توقف؛ }",
+        "متغير أ: نص = \"a\"؛\nإذا (صحيح و (طول(أ[3]) == 1)) { اطبع(1)؛ }",
+        "متغير أ: نص = \"a\"؛ متغير ع: ص8 = 127؛\nبينما (صحيح) { متغير ب: نص = \"b\"؛ اطبع(ع + 1)؛ }",
+    ] {
+        let p = Instrumented::new(source);
+        let o = p.run(0);
+        assert_eq!(o.status.code(), Some(1), "{o:?}");
+        assert_clean(&o);
+        let located = run(source);
+        assert!(String::from_utf8_lossy(&located.stdout).contains("input.lsn:2:"), "{located:?}");
+    }
+}
+
+#[test]
+fn both_if_arms_and_false_loop_condition_release_before_next_statement() {
+    let p = Instrumented::new("خارجي دالة تحقق(س: ط64): فراغ = \"check_live\"؛ متغير أ: نص = \"أ\"؛ متغير ع: ص32 = 0؛ بينما (ع < 2 و طول(أ + \"\") == 1) { إذا (ع == 0) { متغير ب: نص = \"🙂\"؛ اطبع(ب)؛ } وإلا { متغير ب: نص = \"a\0ب\"؛ اطبع(ب)؛ } غير_آمن { تحقق(1)؛ } ع = ع + 1؛ } بينما (طول(أ + \"\") == 0) { اطبع(\"bad\")؛ } غير_آمن { تحقق(1)؛ }");
+    let o = p.run(0);
+    assert!(o.status.success(), "{o:?}");
+    assert_clean(&o);
+    assert_eq!(
+        o.stdout,
+        if cfg!(windows) {
+            "🙂\r\na\0ب\r\n".as_bytes()
+        } else {
+            "🙂\na\0ب\n".as_bytes()
+        }
+    );
+}
+
+#[test]
+fn direct_ir_accepts_main_text_control_flow() {
+    let p = checked("متغير أ: نص = \"a\"؛ بينما (طول(أ) == 1) { إذا (خطأ أو (أ == \"a\")) { توقف؛ } } اطبع(صحيح و (أ == \"a\"))؛");
+    let ir = lisan::native::typed_codegen::generate(&p).unwrap();
+    assert!(ir.contains("LISAN_MANAGED_TEXT_RUNTIME_V1"));
+}
+
+#[test]
+fn logical_nested_expression_preserves_enclosing_text_snapshot() {
+    let o = run("دالة اختر(س: منطقي): ص32 { إذا (س) { أرجع 0؛ } أرجع 1؛ } متغير أ: نص = \"ab\"؛ اطبع(أ[اختر((\"x\" + \"y\") == \"xy\" و صحيح)])؛ اطبع(أ + (أ = \"c\"))؛");
+    assert!(o.status.success(), "{o:?}");
+    assert_eq!(
+        String::from_utf8(o.stdout).unwrap().replace("\r\n", "\n"),
+        "a\nabc\n"
+    );
 }

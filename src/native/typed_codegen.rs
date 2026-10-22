@@ -128,7 +128,8 @@ struct Writer<'a> {
     lines: Vec<String>,
     allocas: Vec<String>,
     locals: HashMap<LocalId, (Type, String)>,
-    loops: Vec<(String, String)>,
+    // Test label, exit label, and first lexical frame owned by this loop.
+    loops: Vec<(String, String, usize)>,
     next: usize,
     terminated: bool,
     result: Type,
@@ -773,6 +774,22 @@ impl<'a> Writer<'a> {
         }
         Ok(())
     }
+    fn flush_text_temps(&mut self) {
+        for slot in std::mem::take(&mut self.text_temps).iter().rev() {
+            self.release_text(slot);
+        }
+    }
+    fn scoped_stmts(&mut self, body: &[TypedStmt]) -> Result<()> {
+        self.text_scopes.push(vec![]);
+        self.stmts(body)?;
+        let slots = self.text_scopes.pop().unwrap();
+        if !self.terminated {
+            for slot in slots.iter().rev() {
+                self.release_text(slot);
+            }
+        }
+        Ok(())
+    }
     fn stmts(&mut self, stmts: &[TypedStmt]) -> Result<()> {
         for s in stmts {
             if self.terminated {
@@ -788,27 +805,24 @@ impl<'a> Writer<'a> {
                     self.expr(e)?;
                 }
                 TypedStmtKind::Block(body) => {
-                    self.text_scopes.push(vec![]);
-                    self.stmts(body)?;
-                    for slot in self.text_scopes.pop().unwrap().iter().rev() {
-                        self.release_text(slot);
-                    }
+                    self.scoped_stmts(body)?;
                 }
                 TypedStmtKind::If(cond, yes, no) => {
                     let v = self.expr(cond)?;
+                    self.flush_text_temps();
                     let y = self.block();
                     let n = self.block();
                     let end = self.block();
                     self.emit(format!("br i1 {v}, label %{y}, label %{n}"));
                     self.label(&y);
-                    self.stmts(yes)?;
+                    self.scoped_stmts(yes)?;
                     let y_done = self.terminated;
                     if !y_done {
                         self.jump(&end);
                     }
                     self.label(&n);
                     if let Some(no) = no {
-                        self.stmts(no)?;
+                        self.scoped_stmts(no)?;
                     }
                     let n_done = self.terminated;
                     if !n_done {
@@ -827,10 +841,12 @@ impl<'a> Writer<'a> {
                     self.jump(&test);
                     self.label(&test);
                     let v = self.expr(cond)?;
+                    self.flush_text_temps();
                     self.emit(format!("br i1 {v}, label %{run}, label %{end}"));
                     self.label(&run);
-                    self.loops.push((test.clone(), end.clone()));
-                    self.stmts(body)?;
+                    self.loops
+                        .push((test.clone(), end.clone(), self.text_scopes.len()));
+                    self.scoped_stmts(body)?;
                     self.loops.pop();
                     if !self.terminated {
                         self.jump(&test);
@@ -838,11 +854,22 @@ impl<'a> Writer<'a> {
                     self.label(&end);
                 }
                 TypedStmtKind::Break | TypedStmtKind::Continue => {
-                    let (test, end) = self
+                    let (test, end, depth) = self
                         .loops
                         .last()
                         .cloned()
                         .ok_or_else(|| error(s.span, "تحكم حلقة خارج الحلقة"))?;
+                    self.flush_text_temps();
+                    // Emit only this path's cleanup; enclosing frames must remain
+                    // intact while lowering other branches and fallthrough.
+                    let slots: Vec<_> = self.text_scopes[depth..]
+                        .iter()
+                        .rev()
+                        .flat_map(|frame| frame.iter().rev().cloned())
+                        .collect();
+                    for slot in slots {
+                        self.release_text(&slot);
+                    }
                     self.jump(if matches!(s.kind, TypedStmtKind::Break) {
                         &end
                     } else {
@@ -862,9 +889,8 @@ impl<'a> Writer<'a> {
                     self.terminated = true;
                 }
             }
-            let temps = std::mem::take(&mut self.text_temps);
-            for slot in temps.iter().rev() {
-                self.release_text(slot);
+            if !self.terminated {
+                self.flush_text_temps();
             }
         }
         Ok(())
@@ -893,7 +919,7 @@ impl<'a> Writer<'a> {
 }
 
 /// Lower checked native IR for the host's x86-64 Linux or Windows C ABI.
-/// Owned text is restricted to straight-line main and lexical blocks.
+/// Owned text is restricted to main and its lexical control-flow scopes.
 pub fn generate(program: &TypedProgram) -> std::result::Result<String, Vec<Diagnostic>> {
     generate_inner(program, false, None).map_err(|e| vec![e])
 }
