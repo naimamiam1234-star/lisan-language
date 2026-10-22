@@ -1,10 +1,11 @@
-//! LLVM lowering for the checked scalar IR. Every potentially poisonous numeric
+//! LLVM lowering for checked scalar IR and restricted main-only owned text.
+//! Every potentially poisonous numeric
 //! instruction is dominated by its range guard. Only the selected branch of a
 //! short-circuit expression executes. The emitted program has no interpreter.
 use crate::{
     ast::Op,
     diagnostic::Diagnostic,
-    source::Span,
+    source::{SourceMap, Span},
     typed::*,
     types::{Abi, FunctionSig, Type},
 };
@@ -103,6 +104,9 @@ struct Module {
     callees: HashMap<FunctionId, Callee>,
     globals: Vec<String>,
     intrinsics: BTreeSet<String>,
+    sources: Option<SourceMap>,
+    managed: bool,
+    slots: Vec<String>,
 }
 impl Module {
     fn text(&mut self, text: &str) -> String {
@@ -129,6 +133,8 @@ struct Writer<'a> {
     terminated: bool,
     result: Type,
     main: bool,
+    text_temps: Vec<String>,
+    text_scopes: Vec<Vec<String>>,
 }
 impl<'a> Writer<'a> {
     fn new(module: &'a mut Module, result: Type, main: bool) -> Self {
@@ -142,6 +148,8 @@ impl<'a> Writer<'a> {
             terminated: false,
             result,
             main,
+            text_temps: vec![],
+            text_scopes: vec![vec![]],
         }
     }
     fn temp(&mut self) -> String {
@@ -170,20 +178,37 @@ impl<'a> Writer<'a> {
         self.emit(format!("br label %{l}"));
         self.terminated = true;
     }
-    fn guard(&mut self, condition: &str) {
+    fn guard(&mut self, condition: &str, span: Span) {
         let ok = self.block();
         let fail = self.block();
         self.emit(format!("br i1 {condition}, label %{ok}, label %{fail}"));
         self.label(&fail);
-        let message = self
+        if self.module.managed {
+            self.emit("call void @.lisan.text.cleanup()");
+        }
+        let location = self
             .module
-            .text("خطأ: تجاوز عددي أو قسمة على صفر أو تحويل خارج النطاق");
+            .sources
+            .as_ref()
+            .map(|m| {
+                let (line, col) = m.line_column(span);
+                let path = m
+                    .sources
+                    .get(span.source.0 as usize)
+                    .map(|s| s.path.display().to_string())
+                    .unwrap_or_else(|| "<native>".into());
+                format!("{path}:{line}:{col}")
+            })
+            .unwrap_or_else(|| "<native>:1:1".into());
+        let message = self.module.text(&format!(
+            "{location}: خطأ: تجاوز عددي أو قسمة على صفر أو تحويل خارج النطاق أو فشل عملية نص"
+        ));
         self.emit(format!("call i32 @puts(ptr {message})"));
         self.emit("call void @exit(i32 1)");
         self.emit("unreachable");
         self.label(&ok);
     }
-    fn finite(&mut self, v: &str, bits: u8) {
+    fn finite(&mut self, v: &str, bits: u8, span: Span) {
         let t = if bits == 32 { "float" } else { "double" };
         let name = format!("llvm.fabs.f{bits}");
         self.module
@@ -196,15 +221,83 @@ impl<'a> Writer<'a> {
             f64::MAX
         };
         let valid = self.value(format!("fcmp ole {t} {abs}, {}", float_constant(max, bits)));
-        self.guard(&valid);
+        self.guard(&valid, span);
     }
-    fn bind(&mut self, id: LocalId, t: &Type, v: &str) -> Result<()> {
+    fn bind(&mut self, id: LocalId, t: &Type, v: &str, span: Span) -> Result<()> {
+        if *t == Type::Text {
+            let p = self.text_slot(false);
+            self.clone_text(v, &p, span);
+            self.text_scopes.last_mut().unwrap().push(p.clone());
+            self.locals.insert(id, (t.clone(), p));
+            return Ok(());
+        }
         let ty = llvm(t)?;
         let p = self.temp();
         self.allocas.push(format!("  {p} = alloca {ty}"));
         self.emit(format!("store {ty} {v}, ptr {p}"));
         self.locals.insert(id, (t.clone(), p));
         Ok(())
+    }
+    fn text_slot(&mut self, temporary: bool) -> String {
+        let slot = format!("@.lisan.text.slot.{}", self.module.slots.len());
+        self.module.globals.push(format!(
+            "{slot} = private global {{i64, ptr}} zeroinitializer"
+        ));
+        self.module.slots.push(slot.clone());
+        if temporary {
+            self.text_temps.push(slot.clone());
+        }
+        slot
+    }
+    fn release_text(&mut self, slot: &str) {
+        self.emit(format!(
+            "call void @lisan_rt_text_release(ptr %text.ctx, ptr {slot})"
+        ));
+    }
+    fn text_status(&mut self, status: &str, span: Span) {
+        let ok = self.value(format!("icmp eq i32 {status}, 0"));
+        self.guard(&ok, span);
+    }
+    fn clone_text(&mut self, source: &str, target: &str, span: Span) {
+        let status = self.value(format!(
+            "call i32 @lisan_rt_text_clone(ptr %text.ctx, ptr {source}, ptr {target})"
+        ));
+        self.text_status(&status, span);
+    }
+    fn text_index(&mut self, v: &str, ty: &Type, span: Span) -> Result<String> {
+        match ty {
+            Type::Int { signed, bits } => {
+                if *signed {
+                    let ok = self.value(format!("icmp sge i{bits} {v}, 0"));
+                    self.guard(&ok, span);
+                }
+                if *bits == 64 {
+                    Ok(v.into())
+                } else {
+                    Ok(self.value(format!("zext i{bits} {v} to i64")))
+                }
+            }
+            Type::Float { bits } => {
+                self.finite(v, *bits, span);
+                let t = llvm(ty)?;
+                let name = format!("llvm.trunc.f{bits}");
+                self.module
+                    .intrinsics
+                    .insert(format!("declare {t} @{name}({t})"));
+                let trunc = self.value(format!("call {t} @{name}({t} {v})"));
+                let whole = self.value(format!("fcmp oeq {t} {v}, {trunc}"));
+                self.guard(&whole, span);
+                let low = self.value(format!("fcmp oge {t} {v}, {}", float_constant(0., *bits)));
+                self.guard(&low, span);
+                let high = self.value(format!(
+                    "fcmp olt {t} {v}, {}",
+                    float_constant(18446744073709551616., *bits)
+                ));
+                self.guard(&high, span);
+                Ok(self.value(format!("fptoui {t} {v} to i64")))
+            }
+            _ => Err(error(span, "فهرس نص غير صالح")),
+        }
     }
     fn expr(&mut self, e: &TypedExpr) -> Result<String> {
         let t = if e.ty == Type::Text {
@@ -254,10 +347,10 @@ impl<'a> Writer<'a> {
                 }
                 let p = self.expr(pointer)?;
                 let valid = self.value(format!("icmp ne ptr {p}, null"));
-                self.guard(&valid);
+                self.guard(&valid, e.span);
                 let value = self.value(format!("load {t}, ptr {p}, align 1"));
                 if let Type::Float { bits } = e.ty {
-                    self.finite(&value, bits);
+                    self.finite(&value, bits, e.span);
                 }
                 value
             }
@@ -269,16 +362,34 @@ impl<'a> Writer<'a> {
                 let p = self.expr(pointer)?;
                 let v = self.expr(value)?;
                 let valid = self.value(format!("icmp ne ptr {p}, null"));
-                self.guard(&valid);
+                self.guard(&valid, e.span);
                 self.emit(format!("store {} {v}, ptr {p}, align 1", llvm(pointee)?));
                 String::new()
             }
 
-            TypedExprKind::Text(_) => {
-                return Err(error(
-                    e.span,
-                    "النصوص الديناميكية غير مدعومة؛ يمكن طباعة نص ثابت",
-                ))
+            TypedExprKind::Text(text) => {
+                let bytes = self.module.text(text);
+                let slot = self.text_slot(true);
+                let status=self.value(format!("call i32 @lisan_rt_text_from_utf8(ptr %text.ctx, ptr {bytes}, i64 {}, ptr {slot})",text.len()));
+                self.text_status(&status, e.span);
+                slot
+            }
+            TypedExprKind::TextLength(a) => {
+                let a = self.expr(a)?;
+                self.value(format!("call i64 @lisan_rt_text_scalar_len(ptr {a})"))
+            }
+            TypedExprKind::TextIndex(a, b) => {
+                let a_value = self.expr(a)?;
+                let a = self.text_slot(true);
+                self.clone_text(&a_value, &a, e.span);
+                let index = self.expr(b)?;
+                let index = self.text_index(&index, &b.ty, b.span)?;
+                let slot = self.text_slot(true);
+                let status = self.value(format!(
+                    "call i32 @lisan_rt_text_at(ptr %text.ctx, ptr {a}, i64 {index}, ptr {slot})"
+                ));
+                self.text_status(&status, e.span);
+                slot
             }
             TypedExprKind::Variable(id) => {
                 let (_, p) = self
@@ -286,9 +397,12 @@ impl<'a> Writer<'a> {
                     .get(id)
                     .ok_or_else(|| error(e.span, "متغير غير معروف"))?
                     .clone();
+                if e.ty == Type::Text {
+                    return Ok(p);
+                }
                 let value = self.value(format!("load {t}, ptr {p}"));
                 if let Type::Float { bits } = e.ty {
-                    self.finite(&value, bits);
+                    self.finite(&value, bits, e.span);
                 }
                 value
             }
@@ -299,8 +413,18 @@ impl<'a> Writer<'a> {
                     .get(id)
                     .ok_or_else(|| error(e.span, "متغير غير معروف"))?
                     .clone();
-                self.emit(format!("store {t} {v}, ptr {p}"));
-                v
+                if e.ty == Type::Text {
+                    let stage = self.text_slot(true);
+                    self.clone_text(&v, &stage, e.span);
+                    self.release_text(&p);
+                    let descriptor = self.value(format!("load {{i64, ptr}}, ptr {stage}"));
+                    self.emit(format!("store {{i64, ptr}} {descriptor}, ptr {p}"));
+                    self.emit(format!("store {{i64, ptr}} zeroinitializer, ptr {stage}"));
+                    p
+                } else {
+                    self.emit(format!("store {t} {v}, ptr {p}"));
+                    v
+                }
             }
             TypedExprKind::Unary(op, a) => {
                 let v = self.expr(a)?;
@@ -312,7 +436,7 @@ impl<'a> Writer<'a> {
                         }
                         Type::Float { bits } => {
                             let r = self.value(format!("fneg {t} {v}"));
-                            self.finite(&r, bits);
+                            self.finite(&r, bits, e.span);
                             r
                         }
                         _ => return Err(error(e.span, "معامل أحادي غير مدعوم")),
@@ -351,9 +475,32 @@ impl<'a> Writer<'a> {
                 self.value(format!("load i1, ptr {slot}"))
             }
             TypedExprKind::Binary(a, op, b) => {
-                let av = self.expr(a)?;
+                let mut av = self.expr(a)?;
+                if a.ty == Type::Text {
+                    let snapshot = self.text_slot(true);
+                    self.clone_text(&av, &snapshot, a.span);
+                    av = snapshot;
+                }
                 let bv = self.expr(b)?;
-                self.binary(*op, &av, &bv, &a.ty, e.span)?
+                if a.ty == Type::Text {
+                    if matches!(op, Op::Add) {
+                        let slot = self.text_slot(true);
+                        let status=self.value(format!("call i32 @lisan_rt_text_concat(ptr %text.ctx, ptr {av}, ptr {bv}, ptr {slot})"));
+                        self.text_status(&status, e.span);
+                        slot
+                    } else {
+                        let equal = self.value(format!(
+                            "call zeroext i1 @lisan_rt_text_equal(ptr {av}, ptr {bv})"
+                        ));
+                        if matches!(op, Op::NotEqual) {
+                            self.value(format!("xor i1 {equal}, true"))
+                        } else {
+                            equal
+                        }
+                    }
+                } else {
+                    self.binary(*op, &av, &bv, &a.ty, e.span)?
+                }
             }
             TypedExprKind::Cast(a) => {
                 let v = self.expr(a)?;
@@ -387,7 +534,7 @@ impl<'a> Writer<'a> {
                     self.value(call)
                 };
                 if let Type::Float { bits } = e.ty {
-                    self.finite(&r, bits);
+                    self.finite(&r, bits, e.span);
                 }
                 r
             }
@@ -418,7 +565,7 @@ impl<'a> Writer<'a> {
                 let pair = self.value(format!("call {{ {t}, i1 }} @{intrinsic}({t} {a}, {t} {b})"));
                 let overflow = self.value(format!("extractvalue {{ {t}, i1 }} {pair}, 1"));
                 let valid = self.value(format!("xor i1 {overflow}, true"));
-                self.guard(&valid);
+                self.guard(&valid, span);
                 Ok(self.value(format!("extractvalue {{ {t}, i1 }} {pair}, 0")))
             }
             Op::Divide | Op::Modulo => {
@@ -431,7 +578,7 @@ impl<'a> Writer<'a> {
                     let good = self.value(format!("xor i1 {bad}, true"));
                     valid = self.value(format!("and i1 {valid}, {good}"));
                 }
-                self.guard(&valid);
+                self.guard(&valid, span);
                 Ok(self.value(format!(
                     "{prefix}{} {t} {a}, {b}",
                     if matches!(op, Op::Divide) {
@@ -482,13 +629,13 @@ impl<'a> Writer<'a> {
                             .intrinsics
                             .insert(format!("declare {t} @{name}({t}, {t})"));
                         let r = self.value(format!("call {t} @{name}({t} {a}, {t} {b})"));
-                        self.finite(&r, *bits);
+                        self.finite(&r, *bits, span);
                         return Ok(r);
                     }
                     _ => return Err(error(span, "عملية عشرية غير مدعومة")),
                 };
                 let r = self.value(format!("{opcode} {t} {a}, {b}"));
-                self.finite(&r, *bits);
+                self.finite(&r, *bits, span);
                 Ok(r)
             }
             _ => Err(error(span, "عملية غير مدعومة على هذا النوع")),
@@ -519,7 +666,7 @@ impl<'a> Writer<'a> {
                 let low = self.value(format!("icmp sge i128 {wide}, {lo}"));
                 let high = self.value(format!("icmp sle i128 {wide}, {hi}"));
                 let valid = self.value(format!("and i1 {low}, {high}"));
-                self.guard(&valid);
+                self.guard(&valid, span);
                 if fb == tb {
                     Ok(v.into())
                 } else {
@@ -539,7 +686,7 @@ impl<'a> Writer<'a> {
                     "{} {a} {v} to {b}",
                     if *signed { "sitofp" } else { "uitofp" }
                 ));
-                self.finite(&r, *bits);
+                self.finite(&r, *bits, span);
                 Ok(r)
             }
             (Type::Float { bits: fb }, Type::Float { bits: tb }) => {
@@ -547,11 +694,11 @@ impl<'a> Writer<'a> {
                     "{} {a} {v} to {b}",
                     if tb < fb { "fptrunc" } else { "fpext" }
                 ));
-                self.finite(&r, *tb);
+                self.finite(&r, *tb, span);
                 Ok(r)
             }
             (Type::Float { bits }, Type::Int { signed, bits: ib }) => {
-                self.finite(v, *bits);
+                self.finite(v, *bits, span);
                 let name = format!("llvm.trunc.f{bits}");
                 self.module
                     .intrinsics
@@ -563,7 +710,7 @@ impl<'a> Writer<'a> {
                 let lower = self.value(format!("fcmp oge {a} {v}, {}", float_constant(low, *bits)));
                 let upper = self.value(format!("fcmp olt {a} {v}, {}", float_constant(pow, *bits)));
                 let valid = self.value(format!("and i1 {lower}, {upper}"));
-                self.guard(&valid);
+                self.guard(&valid, span);
                 Ok(self.value(format!(
                     "{} {a} {v} to {b}",
                     if *signed { "fptosi" } else { "fptoui" }
@@ -574,18 +721,19 @@ impl<'a> Writer<'a> {
     }
     fn print(&mut self, e: &TypedExpr) -> Result<()> {
         if let TypedExprKind::Text(text) = &e.kind {
-            if text.contains('\0') {
-                return Err(error(
-                    e.span,
-                    "النص الثابت المطبوع يحتوي محرف NUL غير مدعوم",
-                ));
+            if !text.contains('\0') {
+                let p = self.module.text(text);
+                self.emit(format!("call i32 @puts(ptr {p})"));
+                return Ok(());
             }
-            let p = self.module.text(text);
-            self.emit(format!("call i32 @puts(ptr {p})"));
-            return Ok(());
         }
         let v = self.expr(e)?;
         match &e.ty {
+            Type::Text => {
+                self.emit(format!("call void @lisan_rt_text_print(ptr {v})"));
+                let newline = self.module.text("");
+                self.emit(format!("call i32 @puts(ptr {newline})"));
+            }
             Type::Bool => {
                 let yes = self.module.text("صحيح");
                 let no = self.module.text("خطأ");
@@ -633,13 +781,19 @@ impl<'a> Writer<'a> {
             match &s.kind {
                 TypedStmtKind::Let { id, ty, value, .. } => {
                     let v = self.expr(value)?;
-                    self.bind(*id, ty, &v)?;
+                    self.bind(*id, ty, &v, s.span)?;
                 }
                 TypedStmtKind::Print(e) => self.print(e)?,
                 TypedStmtKind::Expr(e) => {
                     self.expr(e)?;
                 }
-                TypedStmtKind::Block(body) => self.stmts(body)?,
+                TypedStmtKind::Block(body) => {
+                    self.text_scopes.push(vec![]);
+                    self.stmts(body)?;
+                    for slot in self.text_scopes.pop().unwrap().iter().rev() {
+                        self.release_text(slot);
+                    }
+                }
                 TypedStmtKind::If(cond, yes, no) => {
                     let v = self.expr(cond)?;
                     let y = self.block();
@@ -708,11 +862,18 @@ impl<'a> Writer<'a> {
                     self.terminated = true;
                 }
             }
+            let temps = std::mem::take(&mut self.text_temps);
+            for slot in temps.iter().rev() {
+                self.release_text(slot);
+            }
         }
         Ok(())
     }
     fn finish(mut self) -> Result<String> {
         if !self.terminated {
+            if self.main && self.module.managed {
+                self.emit("call void @.lisan.text.cleanup()");
+            }
             let zero = match self.result {
                 Type::Void => {
                     self.emit("ret void");
@@ -731,17 +892,34 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// Lower checked scalar IR for the host's x86-64 Linux or Windows C ABI.
-/// Managed values and dynamic text deliberately produce source diagnostics.
+/// Lower checked native IR for the host's x86-64 Linux or Windows C ABI.
+/// Owned text is restricted to straight-line main and lexical blocks.
 pub fn generate(program: &TypedProgram) -> std::result::Result<String, Vec<Diagnostic>> {
-    generate_inner(program, false).map_err(|e| vec![e])
+    generate_inner(program, false, None).map_err(|e| vec![e])
 }
 /// Emit a host-linkable LLVM module without an entry point.
 /// Library modules must have no top-level executable statements.
 pub fn generate_library(program: &TypedProgram) -> std::result::Result<String, Vec<Diagnostic>> {
-    generate_inner(program, true).map_err(|e| vec![e])
+    generate_inner(program, true, None).map_err(|e| vec![e])
 }
-fn generate_inner(program: &TypedProgram, library: bool) -> Result<String> {
+pub fn generate_with_sources(
+    program: &TypedProgram,
+    sources: &SourceMap,
+) -> std::result::Result<String, Vec<Diagnostic>> {
+    generate_inner(program, false, Some(sources)).map_err(|e| vec![e])
+}
+pub fn generate_library_with_sources(
+    program: &TypedProgram,
+    sources: &SourceMap,
+) -> std::result::Result<String, Vec<Diagnostic>> {
+    generate_inner(program, true, Some(sources)).map_err(|e| vec![e])
+}
+fn generate_inner(
+    program: &TypedProgram,
+    library: bool,
+    sources: Option<&SourceMap>,
+) -> Result<String> {
+    super::managed::validate(program)?;
     if library && !program.main.is_empty() {
         return Err(error(
             program.main[0].span,
@@ -758,6 +936,9 @@ fn generate_inner(program: &TypedProgram, library: bool) -> Result<String> {
         callees: HashMap::new(),
         globals: vec![],
         intrinsics: BTreeSet::new(),
+        sources: sources.cloned(),
+        managed: super::managed::uses_runtime(program),
+        slots: vec![],
     };
     let mut names: HashSet<String> = ["main", "printf", "puts", "exit"]
         .into_iter()
@@ -780,7 +961,8 @@ fn generate_inner(program: &TypedProgram, library: bool) -> Result<String> {
                 .map(|f| (f.id, &f.symbol, &f.signature, f.span)),
         )
     {
-        if name.starts_with("llvm.")
+        if name.starts_with("lisan_rt_")
+            || name.starts_with("llvm.")
             || name.starts_with(".lisan.")
             || (!names.insert(name.clone())
                 && (definitions.contains(name.as_str()) || aliases.get(name) != Some(sig)))
@@ -822,10 +1004,10 @@ fn generate_inner(program: &TypedProgram, library: bool) -> Result<String> {
             params.push(parameter(ty, f.signature.abi, &v)?);
             if f.signature.abi == Abi::C {
                 if let Type::Float { bits } = ty {
-                    w.finite(&v, *bits);
+                    w.finite(&v, *bits, f.span);
                 }
             }
-            w.bind(*id, ty, &v)?;
+            w.bind(*id, ty, &v, f.span)?;
         }
         w.stmts(&f.body)?;
         functions.push(format!(
@@ -845,10 +1027,28 @@ fn generate_inner(program: &TypedProgram, library: bool) -> Result<String> {
             },
             true,
         );
+        if w.module.managed {
+            let size = w.value("call i64 @lisan_rt_context_size()");
+            w.emit(format!("%text.ctx = alloca i8, i64 {size}, align 16"));
+            w.emit("call void @lisan_rt_context_init(ptr %text.ctx)");
+            w.emit("store ptr %text.ctx, ptr @.lisan.text.context");
+        }
         w.stmts(&program.main)?;
         functions.push(format!("define i32 @main() {{\n{}\n}}", w.finish()?));
     }
     let mut out=String::from("; Lisan checked scalar LLVM backend\ndeclare i32 @puts(ptr)\ndeclare i32 @printf(ptr, ...)\ndeclare void @exit(i32) noreturn\n");
+    if m.managed {
+        out.push_str(RUNTIME_DECLS);
+        out.push_str("@.lisan.text.context = private global ptr null\n");
+        let mut cleanup=String::from("define internal void @.lisan.text.cleanup() {\nentry:\n  %ctx = load ptr, ptr @.lisan.text.context\n  %active = icmp ne ptr %ctx, null\n  br i1 %active, label %run, label %done\nrun:\n");
+        for slot in &m.slots {
+            cleanup.push_str(&format!(
+                "  call void @lisan_rt_text_release(ptr %ctx, ptr {slot})\n"
+            ));
+        }
+        cleanup.push_str("  call void @lisan_rt_context_destroy(ptr %ctx)\n  store ptr null, ptr @.lisan.text.context\n  br label %done\ndone:\n  ret void\n}\n");
+        functions.push(cleanup);
+    }
     let mut declared = HashSet::new();
     for f in &program.externs {
         if !declared.insert(&f.symbol) {
@@ -877,3 +1077,5 @@ fn generate_inner(program: &TypedProgram, library: bool) -> Result<String> {
     out.push('\n');
     Ok(out)
 }
+
+const RUNTIME_DECLS:&str = "; LISAN_MANAGED_TEXT_RUNTIME_V1\ndeclare i64 @lisan_rt_context_size()\ndeclare void @lisan_rt_context_init(ptr)\ndeclare void @lisan_rt_context_destroy(ptr)\ndeclare i32 @lisan_rt_text_from_utf8(ptr,ptr,i64,ptr)\ndeclare i32 @lisan_rt_text_clone(ptr,ptr,ptr)\ndeclare i32 @lisan_rt_text_concat(ptr,ptr,ptr,ptr)\ndeclare i32 @lisan_rt_text_at(ptr,ptr,i64,ptr)\ndeclare void @lisan_rt_text_release(ptr,ptr)\ndeclare i64 @lisan_rt_text_scalar_len(ptr)\ndeclare zeroext i1 @lisan_rt_text_equal(ptr,ptr)\ndeclare void @lisan_rt_text_print(ptr)\n";

@@ -122,6 +122,7 @@ impl Parser {
             "ع32" => Type::Float { bits: 32 },
             "ع64" | "عدد" => Type::Float { bits: 64 },
             "منطقي" => Type::Bool,
+            "نص" => Type::Text,
             "فراغ" => Type::Void,
             "مؤشر" => {
                 self.expect(&K::Less, "متوقع '<' بعد مؤشر")?;

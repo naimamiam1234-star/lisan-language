@@ -1,4 +1,4 @@
-//! Checked scalar IR. Integer arithmetic and numeric Cast nodes require runtime
+//! Checked native IR. Integer arithmetic and numeric Cast nodes require runtime
 //! overflow/range checks; calls are resolved by FunctionId, never source names.
 use crate::{
     ast::Op,
@@ -21,6 +21,8 @@ pub enum TypedExprKind {
     Float(f64),
     Bool(bool),
     Text(String),
+    TextLength(Box<TypedExpr>),
+    TextIndex(Box<TypedExpr>, Box<TypedExpr>),
     Variable(LocalId),
     Assign(LocalId, Box<TypedExpr>),
     Unary(Op, Box<TypedExpr>),

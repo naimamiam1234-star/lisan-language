@@ -17,7 +17,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes clang-18 build-essential
+          sudo apt-get install --yes clang-18 libclang-rt-18-dev build-essential
           echo 'LISAN_CLANG=clang-18' >> "$GITHUB_ENV"
       - name: Provision Windows MSVC environment
         if: runner.os == 'Windows'
@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          for sample in native native_collections native_math native_typed; do
+          for sample in native native_collections native_math native_typed native_text; do
             ./target/release/lisan --native "examples/$sample.lsn" --output "dist/$sample"
             "./dist/$sample"
           done
@@ -52,9 +52,10 @@ jobs:
           cp target/release/lisan dist/
           mkdir -p dist/docs dist/examples
           cp LICENSE README.md dist/
-          cp docs/NATIVE-TYPES.md docs/MEMORY-POINTERS.md dist/docs/
+          cp docs/NATIVE-TYPES.md docs/MEMORY-POINTERS.md docs/MANAGED-VALUES.md dist/docs/
           cp -R examples/ffi dist/examples/
-          cp examples/native_typed.lsn dist/examples/
+          cp examples/native_typed.lsn examples/native_text.lsn dist/examples/
+          cp -R runtime dist/
           tar -czf lisan-native-Linux.tar.gz -C dist .
           sha256sum lisan-native-Linux.tar.gz > lisan-native-Linux.sha256
       - name: Compile native release samples (Windows)
@@ -62,7 +63,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist | Out-Null
-          foreach ($sample in @('native', 'native_collections', 'native_math', 'native_typed')) {
+          foreach ($sample in @('native', 'native_collections', 'native_math', 'native_typed', 'native_text')) {
             & ./target/release/lisan.exe --native "examples/$sample.lsn" --output "dist/$sample.exe"
             if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $sample" }
             & "./dist/$sample.exe"
@@ -77,9 +78,10 @@ jobs:
           Copy-Item target/release/lisan.exe dist/
           New-Item -ItemType Directory -Path dist/docs,dist/examples | Out-Null
           Copy-Item LICENSE,README.md dist/
-          Copy-Item docs/NATIVE-TYPES.md,docs/MEMORY-POINTERS.md dist/docs/
+          Copy-Item docs/NATIVE-TYPES.md,docs/MEMORY-POINTERS.md,docs/MANAGED-VALUES.md dist/docs/
           Copy-Item -Recurse examples/ffi dist/examples/
-          Copy-Item examples/native_typed.lsn dist/examples/
+          Copy-Item examples/native_typed.lsn,examples/native_text.lsn dist/examples/
+          Copy-Item -Recurse runtime dist/
           Compress-Archive -Path dist/* -DestinationPath lisan-native-Windows.zip
           $hash = (Get-FileHash lisan-native-Windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  lisan-native-Windows.zip" | Set-Content -Encoding ascii lisan-native-Windows.sha256

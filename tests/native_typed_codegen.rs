@@ -491,17 +491,15 @@ fn c_import_export_exact_abi_execute() {
     assert_eq!(&out.stdout, b"1\n");
 }
 #[test]
-fn unsupported_managed_values_are_source_diagnostics() {
-    let mut expr = e(TypedExprKind::Text("dynamic".into()), Type::Text);
-    expr.span = Span {
-        start: 10,
-        end: 20,
-        ..Default::default()
-    };
-    let err = lisan::native::typed_codegen::generate(&program(vec![s(TypedStmtKind::Expr(expr))]))
-        .unwrap_err();
-    assert_eq!(err[0].primary.start, 10);
-    assert_eq!(err[0].code, "E_NATIVE_TYPED");
+fn managed_text_expression_executes_and_is_released() {
+    let out = execute(
+        program(vec![s(TypedStmtKind::Expr(e(
+            TypedExprKind::Text("dynamic".into()),
+            Type::Text,
+        )))]),
+        None,
+    );
+    assert!(out.status.success());
 }
 #[test]
 fn c_nonfinite_result_is_rejected() {
@@ -554,13 +552,16 @@ fn float_zero_divisors_trap_for_both_signs() {
     }
 }
 #[test]
-fn embedded_nul_text_print_is_diagnosed() {
-    let err = lisan::native::typed_codegen::generate(&program(vec![print(e(
-        TypedExprKind::Text("a\0b".into()),
-        Type::Text,
-    ))]))
-    .unwrap_err();
-    assert_eq!(err[0].code, "E_NATIVE_TYPED");
+fn embedded_nul_text_print_preserves_bytes() {
+    let out = execute(
+        program(vec![print(e(
+            TypedExprKind::Text("a\0b".into()),
+            Type::Text,
+        ))]),
+        None,
+    );
+    assert!(out.status.success());
+    assert_eq!(&out.stdout, b"a\0b\n");
 }
 #[test]
 fn library_object_links_with_c_host_main() {

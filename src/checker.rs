@@ -222,6 +222,7 @@ pub fn check(program: &syntax::Program) -> std::result::Result<TypedProgram, Vec
         }
     }
     if errors.is_empty() {
+        crate::native::managed::validate(&out).map_err(|e| vec![e])?;
         Ok(out)
     } else {
         Err(errors)
@@ -453,7 +454,12 @@ impl Checker {
     fn hint(&self, e: &syntax::Expr) -> Option<Type> {
         match &e.kind {
             E::Variable(n) => self.local(n, e.span).ok().map(|l| l.ty),
+            E::Call(n, _) if n == "طول" && !self.decls.contains_key(n) => Some(Type::Int {
+                signed: false,
+                bits: 64,
+            }),
             E::Call(n, _) => self.decls.get(n).map(|d| d.signature.result.clone()),
+            E::Index(_, _) => Some(Type::Text),
             E::Cast(t, _) => Some(t.kind.clone()),
             E::Bool(_) => Some(Type::Bool),
             E::Text(_) => Some(Type::Text),
@@ -573,7 +579,8 @@ impl Checker {
                 if !logical {
                     let equality = matches!(op, Op::Equal | Op::NotEqual);
                     if !a.ty.is_numeric()
-                        && !(equality && matches!(a.ty, Type::Bool | Type::Pointer(_)))
+                        && !(equality && matches!(a.ty, Type::Bool | Type::Pointer(_) | Type::Text))
+                        && !(a.ty == Type::Text && matches!(op, Op::Add))
                     {
                         return Err(error("E_TYPE_MISMATCH", span, "المعامل لا يدعم هذا النوع"));
                     }
@@ -587,6 +594,26 @@ impl Checker {
                     a.ty.clone()
                 };
                 TypedExprKind::Binary(Box::new(a), *op, Box::new(b))
+            }
+            E::Index(a, i) => {
+                let a = self.expr(a, Some(&Type::Text))?;
+                let i = self.expr(i, None)?;
+                if !i.ty.is_numeric() {
+                    return Err(error("E_TYPE_MISMATCH", i.span, "فهرس النص يتطلب عددا"));
+                }
+                ty = Type::Text;
+                TypedExprKind::TextIndex(Box::new(a), Box::new(i))
+            }
+            E::Call(name, args) if name == "طول" && !self.decls.contains_key(name) => {
+                if args.len() != 1 {
+                    return Err(error("E_TYPE_MISMATCH", span, "طول تتطلب نصا واحدا"));
+                }
+                let a = self.expr(&args[0], Some(&Type::Text))?;
+                ty = Type::Int {
+                    signed: false,
+                    bits: 64,
+                };
+                TypedExprKind::TextLength(Box::new(a))
             }
             E::Call(name, args) => {
                 let d = self.decls.get(name).cloned().ok_or_else(|| {

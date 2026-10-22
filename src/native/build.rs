@@ -152,6 +152,27 @@ pub fn compile_ir_with_options(
         .into(),
     });
     fs::write(&input, ir).map_err(|e| format!("تعذر كتابة LLVM IR: {}", e))?;
+    let runtime = ir
+        .lines()
+        .any(|line| line == "; LISAN_MANAGED_TEXT_RUNTIME_V1")
+        && options.emit == NativeEmit::Executable;
+    if runtime {
+        fs::write(
+            directory.0.join("value.h"),
+            include_str!("../../runtime/common/value.h"),
+        )
+        .map_err(|e| e.to_string())?;
+        fs::write(
+            directory.0.join("value.c"),
+            include_str!("../../runtime/common/value.c"),
+        )
+        .map_err(|e| e.to_string())?;
+        fs::write(
+            directory.0.join("allocator.c"),
+            include_str!("../../runtime/host/allocator.c"),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     let mut command = Command::new(&compiler);
     command
         .arg("-x")
@@ -165,6 +186,11 @@ pub fn compile_ir_with_options(
     if options.emit == NativeEmit::Object {
         command.arg("-c");
     } else {
+        if runtime {
+            command
+                .arg(directory.0.join("value.c"))
+                .arg(directory.0.join("allocator.c"));
+        }
         command.args(&link_inputs);
         for path in &options.library_paths {
             command.arg("-L").arg(path);

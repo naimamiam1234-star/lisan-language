@@ -2,6 +2,7 @@
 //! The emitted executable never includes the Rust interpreter or serialized AST.
 use crate::ast::{Expr, Function, Op, Stmt};
 mod build;
+pub mod managed;
 pub mod typed_codegen;
 pub use build::{compile_ir, compile_ir_with_options, save_ir, NativeBuildOptions, NativeEmit};
 use std::collections::HashMap;
@@ -1171,9 +1172,9 @@ fn emit_loaded(loaded: &crate::modules::LoadedProgram, library: bool) -> Result<
                 .join("\n")
         })?;
         let generated = if library {
-            typed_codegen::generate_library(&checked)
+            typed_codegen::generate_library_with_sources(&checked, &loaded.sources)
         } else {
-            typed_codegen::generate(&checked)
+            typed_codegen::generate_with_sources(&checked, &loaded.sources)
         };
         generated.map_err(|errors| {
             errors
