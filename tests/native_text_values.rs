@@ -619,7 +619,10 @@ fn recursive_text_returns_and_argument_snapshots() {
     let p = Instrumented::new("دالة كرر(س: نص، ن: ص32): نص { متغير ع: نص = س + \"x\"؛ إذا (ن == 0) { أرجع ع؛ } أرجع كرر(ع، ن - 1)؛ } دالة اختر(أ: نص، ب: نص): نص { أ = أ + ب؛ أرجع أ؛ } متغير س: نص = \"a\"؛ اطبع(اختر(س، س = \"b\"))؛ اطبع(كرر(س، 8))؛");
     let out = p.run(0);
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "ab\nbxxxxxxxxx\n");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
+        "ab\nbxxxxxxxxx\n"
+    );
     assert_clean(&out);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let calls: usize = stderr
