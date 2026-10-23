@@ -459,7 +459,15 @@ impl Checker {
                 bits: 64,
             }),
             E::Call(n, _) => self.decls.get(n).map(|d| d.signature.result.clone()),
-            E::Index(_, _) => Some(Type::Text),
+            E::Index(a, _) => match self.hint(a) {
+                Some(Type::List(t)) => Some(*t),
+                Some(Type::Text) => Some(Type::Text),
+                _ => None,
+            },
+            E::List(v) => v
+                .iter()
+                .find_map(|v| self.hint(v))
+                .map(|t| Type::List(Box::new(t))),
             E::Cast(t, _) => Some(t.kind.clone()),
             E::Bool(_) => Some(Type::Bool),
             E::Text(_) => Some(Type::Text),
@@ -507,6 +515,53 @@ impl Checker {
             E::Bool(b) => {
                 ty = Type::Bool;
                 TypedExprKind::Bool(*b)
+            }
+            E::List(items) => {
+                let element = match expected {
+                    Some(Type::List(t)) => Some((**t).clone()),
+                    _ => items.iter().find_map(|item| self.hint(item)),
+                };
+                if element.as_ref().is_some_and(|t| !t.is_list_element()) {
+                    return Err(error("E_UNSUPPORTED", span, "نوع عنصر القائمة غير مدعوم"));
+                }
+                let mut values = Vec::new();
+                let mut element = element;
+                for item in items {
+                    let value = self.expr(item, element.as_ref())?;
+                    if !value.ty.is_list_element() {
+                        return Err(error(
+                            "E_UNSUPPORTED",
+                            item.span,
+                            "نوع عنصر القائمة غير مدعوم",
+                        ));
+                    }
+                    if element.is_none() {
+                        element = Some(value.ty.clone());
+                    }
+                    values.push(value);
+                }
+                let element = element.ok_or_else(|| {
+                    error("E_TYPE_MISMATCH", span, "القائمة الفارغة تتطلب نوعا محددا")
+                })?;
+                ty = Type::List(Box::new(element));
+                TypedExprKind::List(values)
+            }
+            E::AssignIndex(name, index, value) => {
+                let local = self.local(name, span)?;
+                let Type::List(element) = &local.ty else {
+                    return Err(error("E_TYPE_MISMATCH", span, "تعيين الفهرس يتطلب قائمة"));
+                };
+                let index = self.expr(index, None)?;
+                if !index.ty.is_numeric() {
+                    return Err(error("E_TYPE_MISMATCH", index.span, "الفهرس يتطلب عددا"));
+                }
+                let value = self.expr(value, Some(element))?;
+                ty = value.ty.clone();
+                TypedExprKind::ListSet {
+                    target: local.id,
+                    index: Box::new(index),
+                    value: Box::new(value),
+                }
             }
             E::Text(s) => {
                 ty = Type::Text;
@@ -579,7 +634,11 @@ impl Checker {
                 if !logical {
                     let equality = matches!(op, Op::Equal | Op::NotEqual);
                     if !a.ty.is_numeric()
-                        && !(equality && matches!(a.ty, Type::Bool | Type::Pointer(_) | Type::Text))
+                        && !(equality
+                            && matches!(
+                                a.ty,
+                                Type::Bool | Type::Pointer(_) | Type::Text | Type::List(_)
+                            ))
                         && !(a.ty == Type::Text && matches!(op, Op::Add))
                     {
                         return Err(error("E_TYPE_MISMATCH", span, "المعامل لا يدعم هذا النوع"));
@@ -596,24 +655,62 @@ impl Checker {
                 TypedExprKind::Binary(Box::new(a), *op, Box::new(b))
             }
             E::Index(a, i) => {
-                let a = self.expr(a, Some(&Type::Text))?;
+                let a = self.expr(a, None)?;
                 let i = self.expr(i, None)?;
                 if !i.ty.is_numeric() {
                     return Err(error("E_TYPE_MISMATCH", i.span, "فهرس النص يتطلب عددا"));
                 }
-                ty = Type::Text;
-                TypedExprKind::TextIndex(Box::new(a), Box::new(i))
+                match &a.ty {
+                    Type::Text => {
+                        ty = Type::Text;
+                        TypedExprKind::TextIndex(Box::new(a), Box::new(i))
+                    }
+                    Type::List(element) => {
+                        ty = (**element).clone();
+                        TypedExprKind::ListIndex(Box::new(a), Box::new(i))
+                    }
+                    _ => return Err(error("E_TYPE_MISMATCH", span, "الفهرسة تتطلب نصا أو قائمة")),
+                }
+            }
+            E::Call(name, args) if name == "أضف" && !self.decls.contains_key(name) => {
+                if args.len() != 2 {
+                    return Err(error("E_TYPE_MISMATCH", span, "أضف تتطلب قائمة وقيمة"));
+                }
+                let E::Variable(name) = &args[0].kind else {
+                    return Err(error(
+                        "E_UNSUPPORTED",
+                        args[0].span,
+                        "أضف تتطلب متغير قائمة",
+                    ));
+                };
+                let local = self.local(name, args[0].span)?;
+                let Type::List(element) = &local.ty else {
+                    return Err(error("E_TYPE_MISMATCH", args[0].span, "أضف تتطلب قائمة"));
+                };
+                let value = self.expr(&args[1], Some(element))?;
+                ty = Type::Void;
+                TypedExprKind::ListAppend {
+                    target: local.id,
+                    value: Box::new(value),
+                }
             }
             E::Call(name, args) if name == "طول" && !self.decls.contains_key(name) => {
                 if args.len() != 1 {
                     return Err(error("E_TYPE_MISMATCH", span, "طول تتطلب نصا واحدا"));
                 }
-                let a = self.expr(&args[0], Some(&Type::Text))?;
+                let a = self.expr(&args[0], None)?;
+                if !matches!(a.ty, Type::Text | Type::List(_)) {
+                    return Err(error("E_TYPE_MISMATCH", span, "طول تتطلب نصا أو قائمة"));
+                }
                 ty = Type::Int {
                     signed: false,
                     bits: 64,
                 };
-                TypedExprKind::TextLength(Box::new(a))
+                if matches!(a.ty, Type::List(_)) {
+                    TypedExprKind::ListLength(Box::new(a))
+                } else {
+                    TypedExprKind::TextLength(Box::new(a))
+                }
             }
             E::Call(name, args) => {
                 let d = self.decls.get(name).cloned().ok_or_else(|| {

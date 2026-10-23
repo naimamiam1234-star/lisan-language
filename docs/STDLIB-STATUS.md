@@ -8,7 +8,7 @@ Snapshot: 2026-10-23. This is a source audit, not a claim that every test was ru
 | --- | --- | --- |
 | Interpreter (including interpreter bundles) | `src/runtime.rs`, `src/bundle.rs` | Dynamic numbers (`f64`), booleans, text, null, heterogeneous lists and maps; builtins below. A bundled interpreter is not direct native compilation. |
 | Legacy native | `src/native.rs::generate_llvm` | LLVM for numbers (`double`), booleans, C-string text and numeric lists; user functions take and return numbers. |
-| Typed native | `src/checker.rs`, `src/native/typed_codegen.rs`, `src/native/managed.rs` | Fixed-width numbers, booleans, void, restricted pointers, scalar C ABI, and a restricted managed-text preview. It does not inherit legacy native builtins. |
+| Typed native | `src/checker.rs`, `src/native/typed_codegen.rs`, `src/native/managed.rs` | Fixed-width numbers, booleans, void, restricted pointers, scalar C ABI, and hosted managed text plus homogeneous scalar/text lists. It does not inherit legacy native builtins. |
 
 `src/native.rs::emit_loaded` selects typed native if `syntax::requires_typed` detects typed constructs, or for library output; otherwise it converts to the legacy AST. Adding a type annotation can therefore change the available builtin set. This is a compatibility boundary, not an automatic migration to a superset.
 
@@ -18,11 +18,11 @@ Notation: `N` = finite dynamic number, `T` = text, `B` = boolean, `V` = any dyna
 
 | Builtin and interpreter signature | Interpreter behavior | Legacy native | Typed native |
 | --- | --- | --- | --- |
-| `طول(T / L<V> / M) -> N` | Unicode scalar count / element count / key count | Text or numeric list, returns `double` | `طول(نص) -> ط64` (unsigned 64-bit), managed preview only |
+| `طول(T / L<V> / M) -> N` | Unicode scalar count / element count / key count | Text or numeric list, returns `double` | `طول(نص / قائمة<T>) -> ط64` (unsigned 64-bit), managed preview |
 | `نوع(V) -> T` | Returns `رقم`, `نص`, `منطقي`, `لاشيء`, `قائمة`, or `قاموس` | — | — |
 | `نص(V) -> T` | Uses value display formatting | Number, boolean, or text only | — |
 | `عدد(N / T) -> N` | Parses trimmed Latin numeric text; rejects nonfinite values and Arabic/Persian digits | — | — (numeric casts are separate syntax) |
-| `أضف / اضف(L<V>, V) -> L<V>` | Returns copy with appended value | — | — |
+| `أضف / اضف(L<V>, V) -> L<V>` | Returns copy with appended value | — | `أضف(named_list,value) -> فراغ`: updates named homogeneous list; differs from legacy copy-return behavior |
 | `مدى(N) / مدى(N,N) / مدى(N,N,N) -> L<N>` | End exclusive; default start 0, step 1; positive/negative nonzero step | Only directly in `لكل (x في مدى(...))`; **not** a general list-producing expression | — |
 | `يحتوي(L<V>,V) / يحتوي(T,T) / يحتوي(M,T) -> B` | Element / substring / key membership | — | — |
 | `مفاتيح(M) -> L<T>` | Keys in stored order | — | — |
@@ -53,7 +53,7 @@ Interpreter collections/ranges are capped at 10,000 items; range inputs must be 
 - Interpreter operators provide text concatenation, list concatenation, text/list/map indexing, and assignment to a named list/map index (`src/runtime.rs::eval`, `binary`). Append/delete return copies; indexed assignment updates the variable.
 - Legacy native supports text concatenation (including number/boolean conversion), text equality, Unicode-aware length (text indexing is rejected), numeric-list literals/indexing/index assignment and iteration. Its text representation uses NUL-terminated C strings (`strlen`, `strcmp`, `strcpy`, `strcat`) and heap allocations without the managed-text ownership contract. Do not assume embedded-NUL parity or managed cleanup.
 - Typed managed text currently supports literals, local bindings/copies/reassignment, text-plus-text, equality/inequality, scalar indexing, length, and print in top-level scopes and their supported control flow. Unicode scalar indexing is not grapheme indexing. It preserves embedded NUL. Numeric-plus-text is rejected. Internal functions support text parameters, bodies and results, including recursion and early returns. Call arguments are snapshotted left-to-right; each invocation owns separate descriptors. Hosted fatal errors clean every active frame. Foreign managed signatures, pointer-to-text, managed library output and C exports in managed programs remain rejected. Recoverable status propagation, reentry and concurrency are not implemented.
-- Typed native has no list/map types or list/map standard-library lowering. Its scalar casts, address/load/store/null-pointer operations are language syntax, not dynamic conversion or collection APIs. See `docs/NATIVE-TYPES.md` and `docs/MEMORY-POINTERS.md` for exact spelling and restrictions.
+- Typed native supports `قائمة<T>` for fixed-width numbers, booleans and text, with contextual empty literals, length, bounds-checked indexing/set, append and structural equality. Lists cross internal function boundaries with per-call cleanup and value semantics. Mutation always constructs fresh storage (O(n)); aliases keep their original values. Nested lists, maps, collection foreach/delete and whole-list printing remain unsupported. Its scalar casts, address/load/store/null-pointer operations are language syntax, not dynamic conversion or collection APIs. See `docs/NATIVE-TYPES.md` and `docs/MEMORY-POINTERS.md` for exact spelling and restrictions.
 - `استورد "relative.lsn"` loads source files through `src/modules.rs`: relative nonempty paths, canonical deduplication, cycle checks, top-level imports, depth limit 32 and per-file limit 2,000,000 bytes. Imported functions share one namespace. This is source composition, not an installed package registry, dependency resolver, version lockfile, or namespaced standard-library distribution.
 
 ## Internal managed runtime is not a public language library
@@ -77,7 +77,7 @@ Interpreter collections/ranges are capped at 10,000 items; range inputs must be 
 | `lisan_rt_text_equal` | `(const LisanText*,const LisanText*) -> bool` |
 | `lisan_rt_text_print` | `const LisanText* -> void` |
 
-Owned output slots must be distinct and empty, inputs belong to the context allocator, and callers release values before destroying the context. The header declares `LisanTypeOps`, but that descriptor is not evidence of implemented generic language lists/maps. The host executable build automatically links this runtime when its managed-text IR marker is present; an object is not a self-contained runtime distribution.
+Owned output slots must be distinct and empty, inputs belong to the context allocator, and callers release values before destroying the context. The runtime now implements registered element descriptors and checked scalar/text list allocation, clone, release, index, set, append and equality. This does not imply nested collection or map support. The host executable build automatically links this runtime when its managed-text IR marker is present; an object is not a self-contained runtime distribution.
 
 ## External library integration and target blockers
 
@@ -95,9 +95,9 @@ The build driver accepts object output and explicit link inputs/library paths/li
 
 ## Next milestones and evidence
 
-1. Extend the hosted internal managed-text function increment to the planned recoverable status/context ABI. Exercise argument/return ownership, recursion, nested scopes, early exits, allocation failures, and diagnostics. Keep managed text outside C ABI until an explicit foreign ownership ABI exists.
+1. Extend the hosted internal managed-text/list function increment to the planned recoverable status/context ABI. Exercise argument/return ownership, recursion, nested scopes, early exits, allocation failures, and diagnostics. Keep managed text outside C ABI until an explicit foreign ownership ABI exists.
 2. Port standalone text builtins (`نظّف`, `اقتطع`, `استبدل`, `يحتوي`, conversions) with stated Unicode and failure behavior. Split/join require typed text lists first; keys/values/delete require typed maps. Do not substitute legacy C-string behavior for managed runtime semantics.
-3. Add typed collection representation, element operations and cleanup, then collection builtins and independent parity tests. Define whether dynamic `نوع`/`نص` have typed equivalents rather than promising them by name alone.
+3. Extend the verified hosted scalar/text lists to nested collections and ordered maps, then add their builtins and independent parity tests. Define whether dynamic `نوع`/`نص` have typed equivalents rather than promising them by name alone.
 4. Define a capability-aware I/O layer before porting file calls. Host filesystem operations cannot be reused unchanged on a microcontroller or browser.
 5. Implement target descriptions and freestanding/runtime separation before publishing Arduino or wasm claims. Record board, core, compiler, library version and evidence separately as build-only, simulation, browser, or actual hardware.
 

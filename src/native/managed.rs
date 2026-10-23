@@ -1,21 +1,26 @@
-//! Shared structural gate for the restricted owned-text preview.
+//! Structural gate for hosted owned text and scalar/text homogeneous lists.
 use crate::{ast::Op, diagnostic::Diagnostic, source::Span, typed::*, types::Type};
 fn err(span: Span) -> Diagnostic {
     Diagnostic::new("E_NATIVE_TEXT", span, "نوع أو سياق نص مدار غير مدعوم")
 }
 fn contains(t: &Type) -> bool {
     match t {
-        Type::Text => true,
+        Type::Text | Type::List(_) => true,
         Type::Pointer(t) => contains(t),
         _ => false,
     }
 }
 fn text(e: &TypedExpr) -> bool {
-    e.ty == Type::Text
+    e.ty.is_managed()
         || match &e.kind {
             TypedExprKind::Text(_)
             | TypedExprKind::TextLength(_)
-            | TypedExprKind::TextIndex(_, _) => true,
+            | TypedExprKind::TextIndex(_, _)
+            | TypedExprKind::List(_)
+            | TypedExprKind::ListLength(_)
+            | TypedExprKind::ListIndex(_, _)
+            | TypedExprKind::ListSet { .. }
+            | TypedExprKind::ListAppend { .. } => true,
             TypedExprKind::Unary(_, a)
             | TypedExprKind::Cast(a)
             | TypedExprKind::Load(a)
@@ -43,11 +48,63 @@ fn expr(e: &TypedExpr, allowed: bool) -> Result<(), Diagnostic> {
                 | Binary(_, Op::Add, _)
                 | TextIndex(_, _)
                 | Call { .. }
+                | ListIndex(_, _)
+                | ListSet { .. }
         )
     {
         return Err(err(e.span));
     }
+    if let Type::List(element) = &e.ty {
+        if !element.is_list_element()
+            || !matches!(e.kind, List(_) | Variable(_) | Assign(_, _) | Call { .. })
+        {
+            return Err(err(e.span));
+        }
+    }
     match &e.kind {
+        List(items) => {
+            let Type::List(element) = &e.ty else {
+                return Err(err(e.span));
+            };
+            for item in items {
+                if item.ty != **element {
+                    return Err(err(item.span));
+                }
+                expr(item, allowed)?;
+            }
+        }
+        ListLength(a) => {
+            if !matches!(a.ty, Type::List(_))
+                || e.ty
+                    != (Type::Int {
+                        signed: false,
+                        bits: 64,
+                    })
+            {
+                return Err(err(e.span));
+            }
+            expr(a, allowed)?;
+        }
+        ListIndex(a, i) => {
+            if !matches!(&a.ty,Type::List(t) if **t==e.ty) || !i.ty.is_numeric() {
+                return Err(err(e.span));
+            }
+            expr(a, allowed)?;
+            expr(i, allowed)?;
+        }
+        ListSet { index, value, .. } => {
+            if e.ty != value.ty || !index.ty.is_numeric() {
+                return Err(err(e.span));
+            }
+            expr(index, allowed)?;
+            expr(value, allowed)?;
+        }
+        ListAppend { value, .. } => {
+            if e.ty != Type::Void {
+                return Err(err(e.span));
+            }
+            expr(value, allowed)?;
+        }
         Text(_) if e.ty != Type::Text => return Err(err(e.span)),
         TextLength(a) => {
             if a.ty != Type::Text
@@ -74,6 +131,11 @@ fn expr(e: &TypedExpr, allowed: bool) -> Result<(), Diagnostic> {
             {
                 return Err(err(e.span));
             }
+            if matches!(a.ty, Type::List(_)) || matches!(b.ty, Type::List(_)) {
+                if a.ty != b.ty || e.ty != Type::Bool || !matches!(op, Op::Equal | Op::NotEqual) {
+                    return Err(err(e.span));
+                }
+            }
             if e.ty == Type::Text || a.ty == Type::Text || b.ty == Type::Text {
                 let result = if matches!(op, Op::Equal | Op::NotEqual) {
                     Type::Bool
@@ -96,7 +158,7 @@ fn expr(e: &TypedExpr, allowed: bool) -> Result<(), Diagnostic> {
             expr(a, allowed)?;
         }
         Unary(_, a) | Cast(a) | Load(a) => {
-            if a.ty == Type::Text {
+            if a.ty.is_managed() {
                 return Err(err(e.span));
             }
             expr(a, allowed)?;
@@ -134,7 +196,7 @@ fn stmts(body: &[TypedStmt], allowed: bool) -> Result<(), Diagnostic> {
                 ..
             }) if !t.contains('\0') => {}
             Let { ty, value, .. } => {
-                if (contains(ty) && *ty != Type::Text) || *ty != value.ty {
+                if (contains(ty) && !ty.is_managed()) || *ty != value.ty {
                     return Err(err(s.span));
                 }
                 expr(value, allowed)?;
@@ -172,7 +234,8 @@ fn bindings_expr(
     match &e.kind {
         Variable(id) | Assign(id, _) => {
             let bound = locals.get(id);
-            if (e.ty == Type::Text || bound == Some(&Type::Text)) && bound != Some(&e.ty) {
+            if (e.ty.is_managed() || bound.map_or(false, Type::is_managed)) && bound != Some(&e.ty)
+            {
                 return Err(err(e.span));
             }
             if let Assign(_, a) = &e.kind {
@@ -180,13 +243,38 @@ fn bindings_expr(
             }
         }
         Address(id) => {
-            if locals.get(id) == Some(&Type::Text) {
+            if locals.get(id).map_or(false, Type::is_managed) {
                 return Err(err(e.span));
             }
         }
-        Unary(_, a) | Cast(a) | Load(a) | TextLength(a) => bindings_expr(a, locals)?,
+        List(items) => {
+            for item in items {
+                bindings_expr(item, locals)?;
+            }
+        }
+        ListSet {
+            target,
+            index,
+            value,
+        } => {
+            if !matches!(locals.get(target),Some(Type::List(t)) if **t==value.ty) {
+                return Err(err(e.span));
+            }
+            bindings_expr(index, locals)?;
+            bindings_expr(value, locals)?;
+        }
+        ListAppend { target, value } => {
+            if !matches!(locals.get(target),Some(Type::List(t)) if **t==value.ty) {
+                return Err(err(e.span));
+            }
+            bindings_expr(value, locals)?;
+        }
+        Unary(_, a) | Cast(a) | Load(a) | TextLength(a) | ListLength(a) => {
+            bindings_expr(a, locals)?
+        }
         Binary(a, _, b)
         | TextIndex(a, b)
+        | ListIndex(a, b)
         | Store {
             pointer: a,
             value: b,
@@ -235,6 +323,18 @@ fn bindings(
     Ok(())
 }
 pub fn validate(p: &TypedProgram) -> Result<(), Diagnostic> {
+    for f in &p.functions {
+        for t in f
+            .signature
+            .params
+            .iter()
+            .chain(std::iter::once(&f.signature.result))
+        {
+            if matches!(t,Type::List(e) if !e.is_list_element()) {
+                return Err(err(f.span));
+            }
+        }
+    }
     for f in &p.externs {
         if contains(&f.signature.result) || f.signature.params.iter().any(contains) {
             return Err(err(f.span));
@@ -286,8 +386,8 @@ pub fn uses_runtime(p: &TypedProgram) -> bool {
     }
     body(&p.main)
         || p.functions.iter().any(|f| {
-            f.signature.result == Type::Text
-                || f.signature.params.contains(&Type::Text)
+            f.signature.result.is_managed()
+                || f.signature.params.iter().any(Type::is_managed)
                 || body(&f.body)
         })
 }

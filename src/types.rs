@@ -7,8 +7,23 @@ pub enum Type {
     Pointer(Box<Type>),
     Text,
     NumberList,
+    List(Box<Type>),
 }
 impl Type {
+    pub fn is_managed(&self) -> bool {
+        matches!(self, Self::Text | Self::List(_))
+    }
+    pub fn is_list_element(&self) -> bool {
+        matches!(
+            self,
+            Self::Int {
+                bits: 8 | 16 | 32 | 64,
+                ..
+            } | Self::Float { bits: 32 | 64 }
+                | Self::Bool
+                | Self::Text
+        )
+    }
     pub fn is_numeric(&self) -> bool {
         matches!(self, Self::Int { .. } | Self::Float { .. })
     }
@@ -34,6 +49,7 @@ impl std::fmt::Display for Type {
             Self::Void => write!(f, "فراغ"),
             Self::Pointer(t) => write!(f, "مؤشر<{t}>"),
             Self::Text => write!(f, "نص"),
+            Self::List(t) => write!(f, "قائمة<{t}>"),
             Self::NumberList => write!(f, "قائمة"),
         }
     }

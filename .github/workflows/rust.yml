@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          for sample in native native_collections native_math native_typed native_text native_text_control native_text_functions; do
+          for sample in native native_collections native_math native_typed native_text native_text_control native_text_functions native_managed_lists; do
             ./target/release/lisan --native "examples/$sample.lsn" --output "dist/$sample"
             "./dist/$sample"
           done
@@ -54,7 +54,7 @@ jobs:
           cp LICENSE README.md dist/
           cp docs/NATIVE-TYPES.md docs/MEMORY-POINTERS.md docs/MANAGED-VALUES.md docs/STDLIB-STATUS.md dist/docs/
           cp -R examples/ffi dist/examples/
-          cp examples/native_typed.lsn examples/native_text.lsn examples/native_text_control.lsn examples/native_text_functions.lsn dist/examples/
+          cp examples/native_typed.lsn examples/native_text.lsn examples/native_text_control.lsn examples/native_text_functions.lsn examples/native_managed_lists.lsn dist/examples/
           cp -R runtime dist/
           tar -czf lisan-native-Linux.tar.gz -C dist .
           sha256sum lisan-native-Linux.tar.gz > lisan-native-Linux.sha256
@@ -63,7 +63,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist | Out-Null
-          foreach ($sample in @('native', 'native_collections', 'native_math', 'native_typed', 'native_text', 'native_text_control', 'native_text_functions')) {
+          foreach ($sample in @('native', 'native_collections', 'native_math', 'native_typed', 'native_text', 'native_text_control', 'native_text_functions', 'native_managed_lists')) {
             & ./target/release/lisan.exe --native "examples/$sample.lsn" --output "dist/$sample.exe"
             if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $sample" }
             & "./dist/$sample.exe"
@@ -80,7 +80,7 @@ jobs:
           Copy-Item LICENSE,README.md dist/
           Copy-Item docs/NATIVE-TYPES.md,docs/MEMORY-POINTERS.md,docs/MANAGED-VALUES.md,docs/STDLIB-STATUS.md dist/docs/
           Copy-Item -Recurse examples/ffi dist/examples/
-          Copy-Item examples/native_typed.lsn,examples/native_text.lsn,examples/native_text_control.lsn,examples/native_text_functions.lsn dist/examples/
+          Copy-Item examples/native_typed.lsn,examples/native_text.lsn,examples/native_text_control.lsn,examples/native_text_functions.lsn,examples/native_managed_lists.lsn dist/examples/
           Copy-Item -Recurse runtime dist/
           Compress-Archive -Path dist/* -DestinationPath lisan-native-Windows.zip
           $hash = (Get-FileHash lisan-native-Windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()

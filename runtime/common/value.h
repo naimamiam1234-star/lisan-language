@@ -47,4 +47,18 @@ void lisan_rt_text_release(LisanContext *,LisanText *);
 size_t lisan_rt_text_scalar_len(const LisanText *);
 bool lisan_rt_text_equal(const LisanText *,const LisanText *);
 void lisan_rt_text_print(const LisanText *);
+typedef struct LisanListStorage *LisanList;
+/* Lists are opaque owned pointer slots. Outputs must be distinct empty storage.
+   Only the exported scalar/text operations are supported as element descriptors. */
+extern const LisanTypeOps lisan_rt_ops_i8,lisan_rt_ops_i16,lisan_rt_ops_i32,lisan_rt_ops_i64;
+extern const LisanTypeOps lisan_rt_ops_u8,lisan_rt_ops_u16,lisan_rt_ops_u32,lisan_rt_ops_u64;
+extern const LisanTypeOps lisan_rt_ops_f32,lisan_rt_ops_f64,lisan_rt_ops_bool,lisan_rt_ops_text;
+LisanStatus lisan_rt_list_new(LisanContext *,const LisanTypeOps *,size_t,const void *const *,LisanList *);
+LisanStatus lisan_rt_list_clone(LisanContext *,const LisanList *,LisanList *);
+void lisan_rt_list_release(LisanContext *,LisanList *);
+size_t lisan_rt_list_len(const LisanList *);
+LisanStatus lisan_rt_list_at(LisanContext *,const LisanList *,size_t,void *);
+LisanStatus lisan_rt_list_set(LisanContext *,const LisanList *,size_t,const void *,LisanList *);
+LisanStatus lisan_rt_list_append(LisanContext *,const LisanList *,const void *,LisanList *);
+bool lisan_rt_list_equal(const LisanList *,const LisanList *);
 #endif

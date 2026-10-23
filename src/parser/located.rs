@@ -124,6 +124,12 @@ impl Parser {
             "منطقي" => Type::Bool,
             "نص" => Type::Text,
             "فراغ" => Type::Void,
+            "قائمة" => {
+                self.expect(&K::Less, "متوقع '<' بعد قائمة")?;
+                let inner = self.ty()?;
+                self.expect(&K::Greater, "متوقع '>' بعد نوع القائمة")?;
+                Type::List(Box::new(inner.kind))
+            }
             "مؤشر" => {
                 self.expect(&K::Less, "متوقع '<' بعد مؤشر")?;
                 let inner = self.ty()?;

@@ -21,6 +21,18 @@ pub enum TypedExprKind {
     Float(f64),
     Bool(bool),
     Text(String),
+    List(Vec<TypedExpr>),
+    ListLength(Box<TypedExpr>),
+    ListIndex(Box<TypedExpr>, Box<TypedExpr>),
+    ListSet {
+        target: LocalId,
+        index: Box<TypedExpr>,
+        value: Box<TypedExpr>,
+    },
+    ListAppend {
+        target: LocalId,
+        value: Box<TypedExpr>,
+    },
     TextLength(Box<TypedExpr>),
     TextIndex(Box<TypedExpr>, Box<TypedExpr>),
     Variable(LocalId),

@@ -1,4 +1,4 @@
-//! LLVM lowering for checked scalar IR and hosted owned text.
+//! LLVM lowering for checked scalar IR, hosted owned text and homogeneous lists.
 //! Every potentially poisonous numeric
 //! instruction is dominated by its range guard. Only the selected branch of a
 //! short-circuit expression executes. The emitted program has no interpreter.
@@ -22,7 +22,7 @@ fn llvm(t: &Type) -> Result<String> {
         Type::Float { bits: 64 } => "double".into(),
         Type::Bool => "i1".into(),
         Type::Void => "void".into(),
-        Type::Pointer(_) | Type::Text => "ptr".into(),
+        Type::Pointer(_) | Type::Text | Type::List(_) => "ptr".into(),
         _ => {
             return Err(error(
                 Span::default(),
@@ -82,7 +82,7 @@ fn extension(t: &Type, abi: Abi) -> &'static str {
     }
 }
 fn result_type(sig: &FunctionSig) -> Result<String> {
-    if sig.result == Type::Text {
+    if sig.result.is_managed() {
         return Ok("void".into());
     }
     Ok(format!(
@@ -137,6 +137,7 @@ struct Writer<'a> {
     result: Type,
     main: bool,
     slots: Vec<String>,
+    slot_types: HashMap<String, Type>,
     text_temps: Vec<String>,
     text_scopes: Vec<Vec<String>>,
 }
@@ -153,6 +154,7 @@ impl<'a> Writer<'a> {
             result,
             main,
             slots: vec![],
+            slot_types: HashMap::new(),
             text_temps: vec![],
             text_scopes: vec![vec![]],
         }
@@ -206,7 +208,7 @@ impl<'a> Writer<'a> {
             })
             .unwrap_or_else(|| "<native>:1:1".into());
         let message = self.module.text(&format!(
-            "{location}: خطأ: تجاوز عددي أو قسمة على صفر أو تحويل خارج النطاق أو فشل عملية نص"
+            "{location}: خطأ: تجاوز عددي أو قسمة على صفر أو تحويل خارج النطاق أو فشل عملية قيمة مدارة"
         ));
         self.emit(format!("call i32 @puts(ptr {message})"));
         self.emit("call void @exit(i32 1)");
@@ -229,8 +231,8 @@ impl<'a> Writer<'a> {
         self.guard(&valid, span);
     }
     fn bind(&mut self, id: LocalId, t: &Type, v: &str, span: Span) -> Result<()> {
-        if *t == Type::Text {
-            let p = self.text_slot(false);
+        if t.is_managed() {
+            let p = self.managed_slot(t, false);
             self.clone_text(v, &p, span);
             self.text_scopes.last_mut().unwrap().push(p.clone());
             self.locals.insert(id, (t.clone(), p));
@@ -244,19 +246,33 @@ impl<'a> Writer<'a> {
         Ok(())
     }
     fn text_slot(&mut self, temporary: bool) -> String {
+        self.managed_slot(&Type::Text, temporary)
+    }
+    fn managed_slot(&mut self, ty: &Type, temporary: bool) -> String {
         let slot = self.temp();
-        self.allocas.push(format!("  {slot} = alloca {{i64, ptr}}"));
+        let layout = if *ty == Type::Text {
+            "{i64, ptr}"
+        } else {
+            "ptr"
+        };
+        self.allocas.push(format!("  {slot} = alloca {layout}"));
         self.allocas
-            .push(format!("  store {{i64, ptr}} zeroinitializer, ptr {slot}"));
+            .push(format!("  store {layout} zeroinitializer, ptr {slot}"));
         self.slots.push(slot.clone());
+        self.slot_types.insert(slot.clone(), ty.clone());
         if temporary {
             self.text_temps.push(slot.clone());
         }
         slot
     }
     fn release_text(&mut self, slot: &str) {
+        let kind = if matches!(self.slot_types.get(slot), Some(Type::List(_))) {
+            "list"
+        } else {
+            "text"
+        };
         self.emit(format!(
-            "call void @lisan_rt_text_release(ptr %text.ctx, ptr {slot})"
+            "call void @lisan_rt_{kind}_release(ptr %text.ctx, ptr {slot})"
         ));
     }
     fn text_status(&mut self, status: &str, span: Span) {
@@ -264,10 +280,81 @@ impl<'a> Writer<'a> {
         self.guard(&ok, span);
     }
     fn clone_text(&mut self, source: &str, target: &str, span: Span) {
+        let kind = if matches!(self.slot_types.get(target), Some(Type::List(_)))
+            || (target == "%text.out" && matches!(self.result, Type::List(_)))
+        {
+            "list"
+        } else {
+            "text"
+        };
         let status = self.value(format!(
-            "call i32 @lisan_rt_text_clone(ptr %text.ctx, ptr {source}, ptr {target})"
+            "call i32 @lisan_rt_{kind}_clone(ptr %text.ctx, ptr {source}, ptr {target})"
         ));
         self.text_status(&status, span);
+    }
+    fn move_managed(&mut self, source: &str, target: &str, ty: &Type) {
+        let layout = if *ty == Type::Text {
+            "{i64, ptr}"
+        } else {
+            "ptr"
+        };
+        let value = self.value(format!("load {layout}, ptr {source}"));
+        self.emit(format!("store {layout} {value}, ptr {target}"));
+        self.emit(format!("store {layout} zeroinitializer, ptr {source}"));
+    }
+    fn item_address(&mut self, e: &TypedExpr) -> Result<String> {
+        let value = self.expr(e)?;
+        if e.ty.is_managed() {
+            let snapshot = self.managed_slot(&e.ty, true);
+            self.clone_text(&value, &snapshot, e.span);
+            Ok(snapshot)
+        } else {
+            let ty = llvm(&e.ty)?;
+            let slot = self.temp();
+            self.allocas.push(format!("  {slot} = alloca {ty}"));
+            self.emit(format!("store {ty} {value}, ptr {slot}"));
+            Ok(slot)
+        }
+    }
+    fn list_mutation(
+        &mut self,
+        target: LocalId,
+        index: Option<&TypedExpr>,
+        value: &TypedExpr,
+        span: Span,
+    ) -> Result<String> {
+        let (ty, local) = self
+            .locals
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| error(span, "متغير قائمة غير معروف"))?;
+        let Type::List(_) = &ty else {
+            return Err(error(span, "نوع قائمة غير صالح"));
+        };
+        let snapshot = self.managed_slot(&ty, true);
+        self.clone_text(&local, &snapshot, span);
+        let index = if let Some(i) = index {
+            let v = self.expr(i)?;
+            Some(self.text_index(&v, &i.ty, i.span)?)
+        } else {
+            None
+        };
+        let address = self.item_address(value)?;
+        let output = self.managed_slot(&ty, true);
+        let call = if let Some(i) = index {
+            format!("call i32 @lisan_rt_list_set(ptr %text.ctx, ptr {snapshot}, i64 {i}, ptr {address}, ptr {output})")
+        } else {
+            format!("call i32 @lisan_rt_list_append(ptr %text.ctx, ptr {snapshot}, ptr {address}, ptr {output})")
+        };
+        let status = self.value(call);
+        self.text_status(&status, span);
+        self.release_text(&local);
+        self.move_managed(&output, &local, &ty);
+        if value.ty.is_managed() {
+            Ok(address)
+        } else {
+            Ok(self.value(format!("load {}, ptr {address}", llvm(&value.ty)?)))
+        }
     }
     fn text_index(&mut self, v: &str, ty: &Type, span: Span) -> Result<String> {
         match ty {
@@ -305,7 +392,7 @@ impl<'a> Writer<'a> {
         }
     }
     fn expr(&mut self, e: &TypedExpr) -> Result<String> {
-        let t = if e.ty == Type::Text {
+        let t = if e.ty.is_managed() {
             String::new()
         } else {
             llvm(&e.ty).map_err(|mut d| {
@@ -372,6 +459,69 @@ impl<'a> Writer<'a> {
                 String::new()
             }
 
+            TypedExprKind::List(items) => {
+                let Type::List(element) = &e.ty else {
+                    return Err(error(e.span, "نوع قائمة غير صالح"));
+                };
+                let name = match element.as_ref() {
+                    Type::Int { signed, bits } => {
+                        format!("{}{bits}", if *signed { "i" } else { "u" })
+                    }
+                    Type::Float { bits } => format!("f{bits}"),
+                    Type::Bool => "bool".into(),
+                    Type::Text => "text".into(),
+                    _ => return Err(error(e.span, "نوع عنصر غير مدعوم")),
+                };
+                let array = self.temp();
+                let len = items.len();
+                self.allocas
+                    .push(format!("  {array} = alloca [{len} x ptr]"));
+                for (i, item) in items.iter().enumerate() {
+                    let address = self.item_address(item)?;
+                    let at = self.value(format!(
+                        "getelementptr [{len} x ptr], ptr {array}, i64 0, i64 {i}"
+                    ));
+                    self.emit(format!("store ptr {address}, ptr {at}"));
+                }
+                let slot = self.managed_slot(&e.ty, true);
+                let status=self.value(format!("call i32 @lisan_rt_list_new(ptr %text.ctx, ptr @lisan_rt_ops_{name}, i64 {len}, ptr {array}, ptr {slot})"));
+                self.text_status(&status, e.span);
+                slot
+            }
+            TypedExprKind::ListLength(a) => {
+                let v = self.expr(a)?;
+                self.value(format!("call i64 @lisan_rt_list_len(ptr {v})"))
+            }
+            TypedExprKind::ListIndex(a, index) => {
+                let v = self.expr(a)?;
+                let snapshot = self.managed_slot(&a.ty, true);
+                self.clone_text(&v, &snapshot, a.span);
+                let i = self.expr(index)?;
+                let i = self.text_index(&i, &index.ty, index.span)?;
+                let output = if e.ty.is_managed() {
+                    self.managed_slot(&e.ty, true)
+                } else {
+                    let p = self.temp();
+                    self.allocas.push(format!("  {p} = alloca {t}"));
+                    p
+                };
+                let status=self.value(format!("call i32 @lisan_rt_list_at(ptr %text.ctx, ptr {snapshot}, i64 {i}, ptr {output})"));
+                self.text_status(&status, e.span);
+                if e.ty.is_managed() {
+                    output
+                } else {
+                    self.value(format!("load {t}, ptr {output}"))
+                }
+            }
+            TypedExprKind::ListSet {
+                target,
+                index,
+                value,
+            } => self.list_mutation(*target, Some(index), value, e.span)?,
+            TypedExprKind::ListAppend { target, value } => {
+                self.list_mutation(*target, None, value, e.span)?;
+                String::new()
+            }
             TypedExprKind::Text(text) => {
                 let bytes = self.module.text(text);
                 let slot = self.text_slot(true);
@@ -402,7 +552,7 @@ impl<'a> Writer<'a> {
                     .get(id)
                     .ok_or_else(|| error(e.span, "متغير غير معروف"))?
                     .clone();
-                if e.ty == Type::Text {
+                if e.ty.is_managed() {
                     return Ok(p);
                 }
                 let value = self.value(format!("load {t}, ptr {p}"));
@@ -418,13 +568,11 @@ impl<'a> Writer<'a> {
                     .get(id)
                     .ok_or_else(|| error(e.span, "متغير غير معروف"))?
                     .clone();
-                if e.ty == Type::Text {
-                    let stage = self.text_slot(true);
+                if e.ty.is_managed() {
+                    let stage = self.managed_slot(&e.ty, true);
                     self.clone_text(&v, &stage, e.span);
                     self.release_text(&p);
-                    let descriptor = self.value(format!("load {{i64, ptr}}, ptr {stage}"));
-                    self.emit(format!("store {{i64, ptr}} {descriptor}, ptr {p}"));
-                    self.emit(format!("store {{i64, ptr}} zeroinitializer, ptr {stage}"));
+                    self.move_managed(&stage, &p, &e.ty);
                     p
                 } else {
                     self.emit(format!("store {t} {v}, ptr {p}"));
@@ -481,13 +629,22 @@ impl<'a> Writer<'a> {
             }
             TypedExprKind::Binary(a, op, b) => {
                 let mut av = self.expr(a)?;
-                if a.ty == Type::Text {
-                    let snapshot = self.text_slot(true);
+                if a.ty.is_managed() {
+                    let snapshot = self.managed_slot(&a.ty, true);
                     self.clone_text(&av, &snapshot, a.span);
                     av = snapshot;
                 }
                 let bv = self.expr(b)?;
-                if a.ty == Type::Text {
+                if matches!(a.ty, Type::List(_)) {
+                    let equal = self.value(format!(
+                        "call zeroext i1 @lisan_rt_list_equal(ptr {av}, ptr {bv})"
+                    ));
+                    if matches!(op, Op::NotEqual) {
+                        self.value(format!("xor i1 {equal}, true"))
+                    } else {
+                        equal
+                    }
+                } else if a.ty == Type::Text {
                     if matches!(op, Op::Add) {
                         let slot = self.text_slot(true);
                         let status=self.value(format!("call i32 @lisan_rt_text_concat(ptr %text.ctx, ptr {av}, ptr {bv}, ptr {slot})"));
@@ -530,15 +687,15 @@ impl<'a> Writer<'a> {
                         return Err(error(a.span, "نوع وسيط غير صالح"));
                     }
                     let mut v = self.expr(a)?;
-                    if *ty == Type::Text {
-                        let snapshot = self.text_slot(true);
+                    if ty.is_managed() {
+                        let snapshot = self.managed_slot(ty, true);
                         self.clone_text(&v, &snapshot, a.span);
                         v = snapshot;
                     }
                     values.push(parameter(ty, c.signature.abi, &v)?);
                 }
-                let output = if e.ty == Type::Text {
-                    let slot = self.text_slot(true);
+                let output = if e.ty.is_managed() {
+                    let slot = self.managed_slot(&e.ty, true);
                     values.insert(0, format!("ptr {slot}"));
                     Some(slot)
                 } else {
@@ -910,7 +1067,7 @@ impl<'a> Writer<'a> {
                             return Err(error(s.span, "نوع الإرجاع غير صالح"));
                         }
                         let v = self.expr(value)?;
-                        if self.result == Type::Text {
+                        if self.result.is_managed() {
                             self.clone_text(&v, "%text.out", s.span);
                             self.leave_frame();
                             self.emit("ret void");
@@ -949,7 +1106,7 @@ impl<'a> Writer<'a> {
                 self.leave_frame();
             }
             let zero = match self.result {
-                Type::Text => {
+                Type::Text | Type::List(_) => {
                     self.emit("ret void");
                     None
                 }
@@ -968,11 +1125,20 @@ impl<'a> Writer<'a> {
         if self.module.managed {
             let count = self.slots.len();
             self.allocas
-                .push(format!("  %text.slots = alloca [{count} x ptr]"));
+                .push(format!("  %text.slots = alloca [{count} x {{ptr,ptr}}]"));
             for (i, slot) in self.slots.iter().enumerate() {
-                self.allocas.push(format!("  %text.slot.{i} = getelementptr [{count} x ptr], ptr %text.slots, i64 0, i64 {i}"));
+                self.allocas.push(format!("  %text.slot.{i} = getelementptr [{count} x {{ptr,ptr}}], ptr %text.slots, i64 0, i64 {i}"));
                 self.allocas
                     .push(format!("  store ptr {slot}, ptr %text.slot.{i}"));
+                let kind = if matches!(self.slot_types.get(slot), Some(Type::List(_))) {
+                    "list"
+                } else {
+                    "text"
+                };
+                self.allocas.push(format!("  %text.release.{i} = getelementptr {{ptr,ptr}}, ptr %text.slot.{i}, i32 0, i32 1"));
+                self.allocas.push(format!(
+                    "  store ptr @lisan_rt_{kind}_release, ptr %text.release.{i}"
+                ));
             }
             self.allocas.extend([
                 "  %text.frame = alloca {ptr, ptr, i64}".into(),
@@ -995,7 +1161,7 @@ impl<'a> Writer<'a> {
 }
 
 /// Lower checked native IR for the host's x86-64 Linux or Windows C ABI.
-/// Owned text uses per-invocation descriptors and fatal cleanup of active frames.
+/// Managed values use per-invocation slots and fatal cleanup of active frames.
 pub fn generate(program: &TypedProgram) -> std::result::Result<String, Vec<Diagnostic>> {
     generate_inner(program, false, None).map_err(|e| vec![e])
 }
@@ -1065,7 +1231,7 @@ fn validate_returns(f: &TypedFunction) -> Result<()> {
     }
     let flow = body(&f.body, &f.signature.result)?;
     if f.signature.result != Type::Void
-        && (f.annotated || f.signature.result == Type::Text)
+        && (f.annotated || f.signature.result.is_managed())
         && flow & FALL != 0
     {
         return Err(error(f.span, "ليست كل مسارات الدالة تعيد قيمة"));
@@ -1171,7 +1337,7 @@ fn generate_inner(
         }
         let mut w = Writer::new(&mut m, f.signature.result.clone(), false);
         let mut params = vec![];
-        if f.signature.result == Type::Text {
+        if f.signature.result.is_managed() {
             params.push("ptr %text.out".into());
         }
         for (i, (id, ty)) in f.params.iter().zip(&f.signature.params).enumerate() {
@@ -1214,6 +1380,14 @@ fn generate_inner(
     let mut out=String::from("; Lisan checked scalar LLVM backend\ndeclare i32 @puts(ptr)\ndeclare i32 @printf(ptr, ...)\ndeclare void @exit(i32) noreturn\n");
     if m.managed {
         out.push_str(RUNTIME_DECLS);
+        out.push_str(LIST_RUNTIME_DECLS);
+        for name in [
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "text",
+        ] {
+            out.push_str(&format!(
+                "@lisan_rt_ops_{name} = external constant {{i64,i64,ptr,ptr,ptr}}\n"
+            ));
+        }
         out.push_str("@.lisan.text.context = private global ptr null\n");
         out.push_str("@.lisan.text.frames = private global ptr null\n");
         let cleanup = String::from(
@@ -1238,9 +1412,11 @@ loop:
   %more = icmp ult i64 %i, %count
   br i1 %more, label %release, label %pop
 release:
-  %p = getelementptr ptr, ptr %slots, i64 %i
+  %p = getelementptr {ptr,ptr}, ptr %slots, i64 %i
   %slot = load ptr, ptr %p
-  call void @lisan_rt_text_release(ptr %ctx, ptr %slot)
+  %rp = getelementptr {ptr,ptr}, ptr %p, i32 0, i32 1
+  %releasefn = load ptr, ptr %rp
+  call void %releasefn(ptr %ctx, ptr %slot)
   %next = add i64 %i, 1
   br label %loop
 pop:
@@ -1287,3 +1463,5 @@ done:
 }
 
 const RUNTIME_DECLS:&str = "; LISAN_MANAGED_TEXT_RUNTIME_V1\ndeclare i64 @lisan_rt_context_size()\ndeclare void @lisan_rt_context_init(ptr)\ndeclare void @lisan_rt_context_destroy(ptr)\ndeclare i32 @lisan_rt_text_from_utf8(ptr,ptr,i64,ptr)\ndeclare i32 @lisan_rt_text_clone(ptr,ptr,ptr)\ndeclare i32 @lisan_rt_text_concat(ptr,ptr,ptr,ptr)\ndeclare i32 @lisan_rt_text_at(ptr,ptr,i64,ptr)\ndeclare void @lisan_rt_text_release(ptr,ptr)\ndeclare i64 @lisan_rt_text_scalar_len(ptr)\ndeclare zeroext i1 @lisan_rt_text_equal(ptr,ptr)\ndeclare void @lisan_rt_text_print(ptr)\n";
+
+const LIST_RUNTIME_DECLS:&str = "declare i32 @lisan_rt_list_new(ptr,ptr,i64,ptr,ptr)\ndeclare i32 @lisan_rt_list_clone(ptr,ptr,ptr)\ndeclare void @lisan_rt_list_release(ptr,ptr)\ndeclare i64 @lisan_rt_list_len(ptr)\ndeclare i32 @lisan_rt_list_at(ptr,ptr,i64,ptr)\ndeclare i32 @lisan_rt_list_set(ptr,ptr,i64,ptr,ptr)\ndeclare i32 @lisan_rt_list_append(ptr,ptr,ptr,ptr)\ndeclare zeroext i1 @lisan_rt_list_equal(ptr,ptr)\n";
