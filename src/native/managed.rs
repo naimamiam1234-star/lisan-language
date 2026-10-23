@@ -1,11 +1,7 @@
 //! Shared structural gate for the restricted owned-text preview.
 use crate::{ast::Op, diagnostic::Diagnostic, source::Span, typed::*, types::Type};
 fn err(span: Span) -> Diagnostic {
-    Diagnostic::new(
-        "E_NATIVE_TEXT",
-        span,
-        "النص المدار متاح في المستوى الأعلى فقط؛ نوع أو سياق نص غير مدعوم",
-    )
+    Diagnostic::new("E_NATIVE_TEXT", span, "نوع أو سياق نص مدار غير مدعوم")
 }
 fn contains(t: &Type) -> bool {
     match t {
@@ -41,7 +37,12 @@ fn expr(e: &TypedExpr, allowed: bool) -> Result<(), Diagnostic> {
     if e.ty == Type::Text
         && !matches!(
             &e.kind,
-            Text(_) | Variable(_) | Assign(_, _) | Binary(_, Op::Add, _) | TextIndex(_, _)
+            Text(_)
+                | Variable(_)
+                | Assign(_, _)
+                | Binary(_, Op::Add, _)
+                | TextIndex(_, _)
+                | Call { .. }
         )
     {
         return Err(err(e.span));
@@ -108,7 +109,11 @@ fn expr(e: &TypedExpr, allowed: bool) -> Result<(), Diagnostic> {
             expr(value, allowed)?;
         }
         Call { args, .. } => {
-            if contains(&e.ty) || args.iter().any(|a| contains(&a.ty)) {
+            if matches!(&e.ty, Type::Pointer(_)) && contains(&e.ty)
+                || args
+                    .iter()
+                    .any(|a| matches!(&a.ty, Type::Pointer(_)) && contains(&a.ty))
+            {
                 return Err(err(e.span));
             }
             for a in args {
@@ -153,7 +158,7 @@ fn stmts(body: &[TypedStmt], allowed: bool) -> Result<(), Diagnostic> {
                 expr(c, allowed)?;
                 stmts(b, allowed)?;
             }
-            Return(Some(e)) => expr(e, false)?,
+            Return(Some(e)) => expr(e, allowed)?,
             _ => {}
         }
     }
@@ -230,18 +235,25 @@ fn bindings(
     Ok(())
 }
 pub fn validate(p: &TypedProgram) -> Result<(), Diagnostic> {
-    for (sig, span) in p
-        .functions
-        .iter()
-        .map(|f| (&f.signature, f.span))
-        .chain(p.externs.iter().map(|f| (&f.signature, f.span)))
-    {
-        if contains(&sig.result) || sig.params.iter().any(contains) {
-            return Err(err(span));
+    for f in &p.externs {
+        if contains(&f.signature.result) || f.signature.params.iter().any(contains) {
+            return Err(err(f.span));
         }
     }
     for f in &p.functions {
-        stmts(&f.body, false)?;
+        if (f.signature.abi == crate::types::Abi::C
+            && (contains(&f.signature.result) || f.signature.params.iter().any(contains)))
+            || matches!(&f.signature.result, Type::Pointer(_)) && contains(&f.signature.result)
+            || f.signature
+                .params
+                .iter()
+                .any(|t| matches!(t, Type::Pointer(_)) && contains(t))
+        {
+            return Err(err(f.span));
+        }
+    }
+    for f in &p.functions {
+        stmts(&f.body, true)?;
         let mut locals = f
             .params
             .iter()
@@ -260,7 +272,9 @@ pub fn uses_runtime(p: &TypedProgram) -> bool {
                 kind: TypedExprKind::Text(t),
                 ..
             }) if !t.contains('\0') => false,
-            TypedStmtKind::Print(e) | TypedStmtKind::Expr(e) => text(e),
+            TypedStmtKind::Print(e) | TypedStmtKind::Expr(e) | TypedStmtKind::Return(Some(e)) => {
+                text(e)
+            }
             TypedStmtKind::Let { value, .. } => text(value),
             TypedStmtKind::Block(b) => body(b),
             TypedStmtKind::If(c, a, b) => {
@@ -271,4 +285,9 @@ pub fn uses_runtime(p: &TypedProgram) -> bool {
         })
     }
     body(&p.main)
+        || p.functions.iter().any(|f| {
+            f.signature.result == Type::Text
+                || f.signature.params.contains(&Type::Text)
+                || body(&f.body)
+        })
 }

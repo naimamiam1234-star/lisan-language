@@ -50,16 +50,6 @@ fn bad_indices_are_located() {
         assert!(t.contains("input.lsn:2:"), "{t}");
     }
 }
-#[test]
-fn prohibited_contexts() {
-    for source in ["دالة س(): ط64 { أرجع طول(\"أ\")؛ }"] {
-        let mut map = lisan::source::SourceMap::default();
-        let id = map.add("test.lsn", source);
-        let toks = lisan::lexer::tokenize_located(source, id).unwrap();
-        let p = lisan::parser::parse_located(toks).unwrap();
-        assert!(lisan::checker::check(&p).is_err(), "{source}");
-    }
-}
 
 fn checked(source: &str) -> lisan::typed::TypedProgram {
     lisan::checker::check(
@@ -184,8 +174,6 @@ fn index_widths_and_exact_float_values() {
 #[test]
 fn unsupported_text_types_and_nested_contexts() {
     for source in [
-        "دالة ف(س: نص): ص32 { أرجع 1؛ }",
-        "دالة ف(): نص { أرجع \"أ\"؛ }",
         "خارجي دالة ف(س: نص): فراغ = \"f\"؛",
         "متغير س: مؤشر<نص> = مؤشر_فارغ<نص>()؛",
         "متغير س: نص = \"أ\"؛ اطبع(1 + س)؛",
@@ -282,7 +270,7 @@ fn direct_ir_cannot_bypass_managed_structural_validation() {
                 abi: Abi::Lisan,
             },
             params: vec![],
-            body: vec![stmt(TypedStmtKind::Return(Some(length)))],
+            body: vec![stmt(TypedStmtKind::Return(Some(text.clone())))],
             span,
             annotated: true,
         }],
@@ -624,4 +612,119 @@ fn logical_nested_expression_preserves_enclosing_text_snapshot() {
         String::from_utf8(o.stdout).unwrap().replace("\r\n", "\n"),
         "a\nabc\n"
     );
+}
+
+#[test]
+fn recursive_text_returns_and_argument_snapshots() {
+    let p = Instrumented::new("دالة كرر(س: نص، ن: ص32): نص { متغير ع: نص = س + \"x\"؛ إذا (ن == 0) { أرجع ع؛ } أرجع كرر(ع، ن - 1)؛ } دالة اختر(أ: نص، ب: نص): نص { أ = أ + ب؛ أرجع أ؛ } متغير س: نص = \"a\"؛ اطبع(اختر(س، س = \"b\"))؛ اطبع(كرر(س، 8))؛");
+    let out = p.run(0);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ab\nbxxxxxxxxx\n");
+    assert_clean(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let calls: usize = stderr
+        .split("CALLS=")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    for fail in 1..=calls {
+        let out = p.run(fail);
+        assert_eq!(out.status.code(), Some(1), "fail={fail} {out:?}");
+        assert_clean(&out);
+    }
+}
+#[test]
+fn recursive_scalar_failure_cleans_all_text_frames() {
+    let p = Instrumented::new("دالة ف(س: نص، ن: ص32): نص { متغير ع: نص = س + \"x\"؛ إذا (ن == 0) { متغير ق: ص32 = 1 / ن؛ } أرجع ف(ع، ن - 1)؛ } متغير س: نص = \"a\"؛ اطبع(ف(س، 12))؛");
+    let out = p.run(0);
+    assert_eq!(out.status.code(), Some(1));
+    assert_clean(&out);
+}
+
+#[test]
+fn managed_internal_functions_reject_library_and_foreign_entrypoints() {
+    let p = checked("دالة ف(): نص { أرجع \"أ\"؛ }");
+    assert!(lisan::native::typed_codegen::generate_library(&p).is_err());
+    let p =
+        checked("دالة ف(): ط64 { أرجع طول(\"أ\")؛ } صدّر دالة ج(): ط64 = \"entry\" { أرجع ف()؛ }");
+    assert!(lisan::native::typed_codegen::generate(&p).is_err());
+}
+#[test]
+fn repeated_recursive_calls_release_before_next_statement() {
+    let p = Instrumented::new("خارجي دالة تحقق(س: ط64): فراغ = \"check_live\"؛ دالة ف(س: نص، ن: ص32): نص { إذا (ن == 0) { أرجع س؛ } أرجع ف(س + \"x\"، ن - 1)؛ } متغير س: نص = \"a\"؛ متغير ن: ص32 = 0؛ بينما (ن < 1000) { { متغير ع: نص = ف(س، 5)؛ } غير_آمن { تحقق(1)؛ } ن = ن + 1؛ }");
+    let out = p.run(0);
+    assert!(out.status.success(), "{out:?}");
+    assert_clean(&out);
+}
+
+#[test]
+fn direct_ir_rejects_missing_results_on_all_paths() {
+    use lisan::{typed::*, types::Type};
+    let p = checked("دالة ف(): نص { أرجع \"أ\"؛ }");
+    let span = p.functions[0].span;
+    let statement = |kind| TypedStmt { kind, span };
+    let ret = p.functions[0].body[0].clone();
+    let condition = TypedExpr {
+        kind: TypedExprKind::Bool(true),
+        ty: Type::Bool,
+        span,
+    };
+    let bodies = vec![
+        vec![],
+        vec![statement(TypedStmtKind::Return(None))],
+        vec![statement(TypedStmtKind::If(
+            condition.clone(),
+            vec![ret.clone()],
+            None,
+        ))],
+        vec![statement(TypedStmtKind::If(
+            condition.clone(),
+            vec![ret.clone()],
+            Some(vec![]),
+        ))],
+        vec![
+            ret.clone(),
+            statement(TypedStmtKind::Block(vec![statement(
+                TypedStmtKind::Return(None),
+            )])),
+        ],
+        vec![statement(TypedStmtKind::While(
+            condition.clone(),
+            vec![statement(TypedStmtKind::Break)],
+        ))],
+    ];
+    for body in bodies {
+        let mut invalid = p.clone();
+        invalid.functions[0].body = body;
+        assert!(lisan::native::typed_codegen::generate(&invalid).is_err());
+    }
+    let valid_bodies = vec![
+        vec![statement(TypedStmtKind::If(
+            condition.clone(),
+            vec![ret.clone()],
+            Some(vec![ret.clone()]),
+        ))],
+        vec![statement(TypedStmtKind::While(
+            condition.clone(),
+            vec![ret.clone()],
+        ))],
+        vec![statement(TypedStmtKind::While(
+            condition,
+            vec![statement(TypedStmtKind::Continue)],
+        ))],
+    ];
+    for body in valid_bodies {
+        let mut valid = p.clone();
+        valid.functions[0].body = body;
+        assert!(lisan::native::typed_codegen::generate(&valid).is_ok());
+    }
+    let mut scalar = checked("دالة ف(): ص32 { أرجع 1؛ }");
+    scalar.functions[0].body = vec![statement(TypedStmtKind::Return(None))];
+    assert!(lisan::native::typed_codegen::generate(&scalar).is_err());
+    scalar.functions[0].body.clear();
+    assert!(lisan::native::typed_codegen::generate(&scalar).is_err());
+    scalar.functions[0].annotated = false;
+    assert!(lisan::native::typed_codegen::generate(&scalar).is_ok());
 }

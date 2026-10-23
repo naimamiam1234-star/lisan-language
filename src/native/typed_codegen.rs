@@ -1,4 +1,4 @@
-//! LLVM lowering for checked scalar IR and restricted main-only owned text.
+//! LLVM lowering for checked scalar IR and hosted owned text.
 //! Every potentially poisonous numeric
 //! instruction is dominated by its range guard. Only the selected branch of a
 //! short-circuit expression executes. The emitted program has no interpreter.
@@ -22,7 +22,7 @@ fn llvm(t: &Type) -> Result<String> {
         Type::Float { bits: 64 } => "double".into(),
         Type::Bool => "i1".into(),
         Type::Void => "void".into(),
-        Type::Pointer(_) => "ptr".into(),
+        Type::Pointer(_) | Type::Text => "ptr".into(),
         _ => {
             return Err(error(
                 Span::default(),
@@ -82,6 +82,9 @@ fn extension(t: &Type, abi: Abi) -> &'static str {
     }
 }
 fn result_type(sig: &FunctionSig) -> Result<String> {
+    if sig.result == Type::Text {
+        return Ok("void".into());
+    }
     Ok(format!(
         "{}{}",
         extension(&sig.result, sig.abi),
@@ -106,7 +109,6 @@ struct Module {
     intrinsics: BTreeSet<String>,
     sources: Option<SourceMap>,
     managed: bool,
-    slots: Vec<String>,
 }
 impl Module {
     fn text(&mut self, text: &str) -> String {
@@ -134,6 +136,7 @@ struct Writer<'a> {
     terminated: bool,
     result: Type,
     main: bool,
+    slots: Vec<String>,
     text_temps: Vec<String>,
     text_scopes: Vec<Vec<String>>,
 }
@@ -149,6 +152,7 @@ impl<'a> Writer<'a> {
             terminated: false,
             result,
             main,
+            slots: vec![],
             text_temps: vec![],
             text_scopes: vec![vec![]],
         }
@@ -240,11 +244,11 @@ impl<'a> Writer<'a> {
         Ok(())
     }
     fn text_slot(&mut self, temporary: bool) -> String {
-        let slot = format!("@.lisan.text.slot.{}", self.module.slots.len());
-        self.module.globals.push(format!(
-            "{slot} = private global {{i64, ptr}} zeroinitializer"
-        ));
-        self.module.slots.push(slot.clone());
+        let slot = self.temp();
+        self.allocas.push(format!("  {slot} = alloca {{i64, ptr}}"));
+        self.allocas
+            .push(format!("  store {{i64, ptr}} zeroinitializer, ptr {slot}"));
+        self.slots.push(slot.clone());
         if temporary {
             self.text_temps.push(slot.clone());
         }
@@ -518,17 +522,38 @@ impl<'a> Writer<'a> {
                     return Err(error(e.span, "عدد وسائط غير صالح"));
                 }
                 let mut values = vec![];
+                if e.ty != c.signature.result {
+                    return Err(error(e.span, "نوع إرجاع الاستدعاء غير صالح"));
+                }
                 for (a, ty) in args.iter().zip(&c.signature.params) {
-                    let v = self.expr(a)?;
+                    if a.ty != *ty {
+                        return Err(error(a.span, "نوع وسيط غير صالح"));
+                    }
+                    let mut v = self.expr(a)?;
+                    if *ty == Type::Text {
+                        let snapshot = self.text_slot(true);
+                        self.clone_text(&v, &snapshot, a.span);
+                        v = snapshot;
+                    }
                     values.push(parameter(ty, c.signature.abi, &v)?);
                 }
+                let output = if e.ty == Type::Text {
+                    let slot = self.text_slot(true);
+                    values.insert(0, format!("ptr {slot}"));
+                    Some(slot)
+                } else {
+                    None
+                };
                 let call = format!(
                     "call {} {}({})",
                     result_type(&c.signature)?,
                     symbol(&c.symbol),
                     values.join(", ")
                 );
-                let r = if e.ty == Type::Void {
+                let r = if let Some(output) = output {
+                    self.emit(call);
+                    output
+                } else if e.ty == Type::Void {
                     self.emit(call);
                     String::new()
                 } else {
@@ -881,9 +906,20 @@ impl<'a> Writer<'a> {
                         return Err(error(s.span, "إرجاع خارج دالة"));
                     }
                     if let Some(value) = value {
+                        if value.ty != self.result {
+                            return Err(error(s.span, "نوع الإرجاع غير صالح"));
+                        }
                         let v = self.expr(value)?;
-                        self.emit(format!("ret {} {v}", llvm(&self.result)?));
+                        if self.result == Type::Text {
+                            self.clone_text(&v, "%text.out", s.span);
+                            self.leave_frame();
+                            self.emit("ret void");
+                        } else {
+                            self.leave_frame();
+                            self.emit(format!("ret {} {v}", llvm(&self.result)?));
+                        }
                     } else {
+                        self.leave_frame();
                         self.emit("ret void");
                     }
                     self.terminated = true;
@@ -895,12 +931,28 @@ impl<'a> Writer<'a> {
         }
         Ok(())
     }
+    fn leave_frame(&mut self) {
+        if !self.module.managed {
+            return;
+        }
+        for slot in self.slots.clone().iter().rev() {
+            self.release_text(slot);
+        }
+        self.emit("store ptr %text.previous, ptr @.lisan.text.frames");
+    }
     fn finish(mut self) -> Result<String> {
         if !self.terminated {
             if self.main && self.module.managed {
                 self.emit("call void @.lisan.text.cleanup()");
             }
+            if !self.main {
+                self.leave_frame();
+            }
             let zero = match self.result {
+                Type::Text => {
+                    self.emit("ret void");
+                    None
+                }
                 Type::Void => {
                     self.emit("ret void");
                     None
@@ -913,13 +965,37 @@ impl<'a> Writer<'a> {
                 self.emit(format!("ret {} {z}", llvm(&self.result)?));
             }
         }
+        if self.module.managed {
+            let count = self.slots.len();
+            self.allocas
+                .push(format!("  %text.slots = alloca [{count} x ptr]"));
+            for (i, slot) in self.slots.iter().enumerate() {
+                self.allocas.push(format!("  %text.slot.{i} = getelementptr [{count} x ptr], ptr %text.slots, i64 0, i64 {i}"));
+                self.allocas
+                    .push(format!("  store ptr {slot}, ptr %text.slot.{i}"));
+            }
+            self.allocas.extend([
+                "  %text.frame = alloca {ptr, ptr, i64}".into(),
+                "  %text.previous = load ptr, ptr @.lisan.text.frames".into(),
+                "  store ptr %text.previous, ptr %text.frame".into(),
+                "  %text.frame.slots = getelementptr {ptr, ptr, i64}, ptr %text.frame, i32 0, i32 1".into(),
+                "  store ptr %text.slots, ptr %text.frame.slots".into(),
+                "  %text.frame.count = getelementptr {ptr, ptr, i64}, ptr %text.frame, i32 0, i32 2".into(),
+                format!("  store i64 {count}, ptr %text.frame.count"),
+                "  store ptr %text.frame, ptr @.lisan.text.frames".into(),
+            ]);
+            if !self.main {
+                self.allocas
+                    .push("  %text.ctx = load ptr, ptr @.lisan.text.context".into());
+            }
+        }
         self.lines.splice(1..1, self.allocas);
         Ok(self.lines.join("\n"))
     }
 }
 
 /// Lower checked native IR for the host's x86-64 Linux or Windows C ABI.
-/// Owned text is restricted to main and its lexical control-flow scopes.
+/// Owned text uses per-invocation descriptors and fatal cleanup of active frames.
 pub fn generate(program: &TypedProgram) -> std::result::Result<String, Vec<Diagnostic>> {
     generate_inner(program, false, None).map_err(|e| vec![e])
 }
@@ -940,12 +1016,83 @@ pub fn generate_library_with_sources(
 ) -> std::result::Result<String, Vec<Diagnostic>> {
     generate_inner(program, true, Some(sources)).map_err(|e| vec![e])
 }
+// Mirror source-checker reachability, but validate every return, including
+// statements after an unconditional return which emission will never visit.
+fn validate_returns(f: &TypedFunction) -> Result<()> {
+    const FALL: u8 = 1;
+    const RETURN: u8 = 2;
+    const BREAK: u8 = 4;
+    const CONTINUE: u8 = 8;
+    fn body(stmts: &[TypedStmt], result: &Type) -> Result<u8> {
+        let mut flow = FALL;
+        for s in stmts {
+            let next = match &s.kind {
+                TypedStmtKind::Return(value) => {
+                    if match value {
+                        Some(value) => *result == Type::Void || value.ty != *result,
+                        None => *result != Type::Void,
+                    } {
+                        return Err(error(s.span, "نوع أو قيمة الإرجاع غير صالح"));
+                    }
+                    RETURN
+                }
+                TypedStmtKind::Block(b) => body(b, result)?,
+                TypedStmtKind::If(_, yes, no) => {
+                    body(yes, result)?
+                        | match no {
+                            Some(no) => body(no, result)?,
+                            None => FALL,
+                        }
+                }
+                TypedStmtKind::While(cond, b) => {
+                    let inner = body(b, result)?;
+                    (inner & RETURN)
+                        | if !matches!(cond.kind, TypedExprKind::Bool(true)) || inner & BREAK != 0 {
+                            FALL
+                        } else {
+                            0
+                        }
+                }
+                TypedStmtKind::Break => BREAK,
+                TypedStmtKind::Continue => CONTINUE,
+                _ => FALL,
+            };
+            if flow & FALL != 0 {
+                flow = (flow & !FALL) | next;
+            }
+        }
+        Ok(flow)
+    }
+    let flow = body(&f.body, &f.signature.result)?;
+    if f.signature.result != Type::Void
+        && (f.annotated || f.signature.result == Type::Text)
+        && flow & FALL != 0
+    {
+        return Err(error(f.span, "ليست كل مسارات الدالة تعيد قيمة"));
+    }
+    Ok(())
+}
 fn generate_inner(
     program: &TypedProgram,
     library: bool,
     sources: Option<&SourceMap>,
 ) -> Result<String> {
     super::managed::validate(program)?;
+    for f in &program.functions {
+        validate_returns(f)?;
+    }
+    if super::managed::uses_runtime(program)
+        && (!program.exports.is_empty()
+            || program.functions.iter().any(|f| f.signature.abi == Abi::C))
+    {
+        return Err(error(
+            Span::default(),
+            "تصدير دوال C في برنامج نص مدار غير مدعوم",
+        ));
+    }
+    if library && super::managed::uses_runtime(program) {
+        return Err(error(Span::default(), "تصدير النص المدار غير مدعوم"));
+    }
     if library && !program.main.is_empty() {
         return Err(error(
             program.main[0].span,
@@ -964,7 +1111,6 @@ fn generate_inner(
         intrinsics: BTreeSet::new(),
         sources: sources.cloned(),
         managed: super::managed::uses_runtime(program),
-        slots: vec![],
     };
     let mut names: HashSet<String> = ["main", "printf", "puts", "exit"]
         .into_iter()
@@ -1025,6 +1171,9 @@ fn generate_inner(
         }
         let mut w = Writer::new(&mut m, f.signature.result.clone(), false);
         let mut params = vec![];
+        if f.signature.result == Type::Text {
+            params.push("ptr %text.out".into());
+        }
         for (i, (id, ty)) in f.params.iter().zip(&f.signature.params).enumerate() {
             let v = format!("%arg{i}");
             params.push(parameter(ty, f.signature.abi, &v)?);
@@ -1066,13 +1215,46 @@ fn generate_inner(
     if m.managed {
         out.push_str(RUNTIME_DECLS);
         out.push_str("@.lisan.text.context = private global ptr null\n");
-        let mut cleanup=String::from("define internal void @.lisan.text.cleanup() {\nentry:\n  %ctx = load ptr, ptr @.lisan.text.context\n  %active = icmp ne ptr %ctx, null\n  br i1 %active, label %run, label %done\nrun:\n");
-        for slot in &m.slots {
-            cleanup.push_str(&format!(
-                "  call void @lisan_rt_text_release(ptr %ctx, ptr {slot})\n"
-            ));
-        }
-        cleanup.push_str("  call void @lisan_rt_context_destroy(ptr %ctx)\n  store ptr null, ptr @.lisan.text.context\n  br label %done\ndone:\n  ret void\n}\n");
+        out.push_str("@.lisan.text.frames = private global ptr null\n");
+        let cleanup = String::from(
+            r#"define internal void @.lisan.text.cleanup() {
+entry:
+  %ctx = load ptr, ptr @.lisan.text.context
+  %active = icmp ne ptr %ctx, null
+  br i1 %active, label %frame, label %done
+frame:
+  %f = load ptr, ptr @.lisan.text.frames
+  %has = icmp ne ptr %f, null
+  br i1 %has, label %setup, label %destroy
+setup:
+  %prev = load ptr, ptr %f
+  %sp = getelementptr {ptr,ptr,i64}, ptr %f, i32 0, i32 1
+  %slots = load ptr, ptr %sp
+  %cp = getelementptr {ptr,ptr,i64}, ptr %f, i32 0, i32 2
+  %count = load i64, ptr %cp
+  br label %loop
+loop:
+  %i = phi i64 [0, %setup], [%next, %release]
+  %more = icmp ult i64 %i, %count
+  br i1 %more, label %release, label %pop
+release:
+  %p = getelementptr ptr, ptr %slots, i64 %i
+  %slot = load ptr, ptr %p
+  call void @lisan_rt_text_release(ptr %ctx, ptr %slot)
+  %next = add i64 %i, 1
+  br label %loop
+pop:
+  store ptr %prev, ptr @.lisan.text.frames
+  br label %frame
+destroy:
+  call void @lisan_rt_context_destroy(ptr %ctx)
+  store ptr null, ptr @.lisan.text.context
+  br label %done
+done:
+  ret void
+}
+"#,
+        );
         functions.push(cleanup);
     }
     let mut declared = HashSet::new();
