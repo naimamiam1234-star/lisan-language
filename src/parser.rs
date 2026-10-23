@@ -3,7 +3,13 @@ use crate::lexer::{Token, TokenKind};
 use std::mem::discriminant;
 
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, String> {
-    Parser { tokens, cursor: 0, loop_depth: 0, function_depth: 0 }.program()
+    Parser {
+        tokens,
+        cursor: 0,
+        loop_depth: 0,
+        function_depth: 0,
+    }
+    .program()
 }
 
 struct Parser {
@@ -14,22 +20,41 @@ struct Parser {
 }
 
 impl Parser {
-    fn current(&self) -> &Token { &self.tokens[self.cursor] }
+    fn current(&self) -> &Token {
+        &self.tokens[self.cursor]
+    }
     fn is(&self, kind: &TokenKind) -> bool {
         discriminant(&self.current().kind) == discriminant(kind)
     }
     fn take(&mut self, kind: &TokenKind) -> bool {
-        if self.is(kind) { self.cursor += 1; true } else { false }
+        if self.is(kind) {
+            self.cursor += 1;
+            true
+        } else {
+            false
+        }
     }
     fn error(&self, reason: &str) -> String {
-        format!("السطر {}، العمود {}: {}", self.current().line, self.current().column, reason)
+        format!(
+            "السطر {}، العمود {}: {}",
+            self.current().line,
+            self.current().column,
+            reason
+        )
     }
     fn expect(&mut self, kind: &TokenKind, reason: &str) -> Result<(), String> {
-        if self.take(kind) { Ok(()) } else { Err(self.error(reason)) }
+        if self.take(kind) {
+            Ok(())
+        } else {
+            Err(self.error(reason))
+        }
     }
     fn identifier(&mut self) -> Result<String, String> {
         match self.current().kind.clone() {
-            TokenKind::Identifier(name) => { self.cursor += 1; Ok(name) }
+            TokenKind::Identifier(name) => {
+                self.cursor += 1;
+                Ok(name)
+            }
             _ => Err(self.error("متوقع اسم عربي لمتغير أو دالة")),
         }
     }
@@ -52,7 +77,10 @@ impl Parser {
     fn statement(&mut self) -> Result<Stmt, String> {
         if self.take(&TokenKind::Import) {
             let path = match self.current().kind.clone() {
-                TokenKind::String(path) => { self.cursor += 1; path },
+                TokenKind::String(path) => {
+                    self.cursor += 1;
+                    path
+                }
                 _ => return Err(self.error("استورد تتطلب مسار ملف بين علامتي اقتباس")),
             };
             self.semicolon()?;
@@ -66,9 +94,13 @@ impl Parser {
             if !self.is(&TokenKind::RightParen) {
                 loop {
                     let name = self.identifier()?;
-                    if params.contains(&name) { return Err(self.error("معامل مكرر في الدالة")); }
+                    if params.contains(&name) {
+                        return Err(self.error("معامل مكرر في الدالة"));
+                    }
                     params.push(name);
-                    if !self.take(&TokenKind::Comma) { break; }
+                    if !self.take(&TokenKind::Comma) {
+                        break;
+                    }
                 }
             }
             self.expect(&TokenKind::RightParen, "متوقع ')' بعد معاملات الدالة")?;
@@ -79,7 +111,11 @@ impl Parser {
             let body = self.block();
             self.function_depth -= 1;
             self.loop_depth = enclosing_loop_depth;
-            return Ok(Stmt::Function(Function { name, params, body: body? }));
+            return Ok(Stmt::Function(Function {
+                name,
+                params,
+                body: body?,
+            }));
         }
         if self.take(&TokenKind::Let) {
             let name = self.identifier()?;
@@ -100,7 +136,11 @@ impl Parser {
             let cond = self.expression()?;
             self.expect(&TokenKind::RightParen, "متوقع ')' بعد الشرط")?;
             let yes = self.block()?;
-            let no = if self.take(&TokenKind::Else) { Some(self.block()?) } else { None };
+            let no = if self.take(&TokenKind::Else) {
+                Some(self.block()?)
+            } else {
+                None
+            };
             return Ok(Stmt::If(cond, yes, no));
         }
         if self.take(&TokenKind::ForEach) {
@@ -124,22 +164,34 @@ impl Parser {
             return Ok(Stmt::While(cond, body?));
         }
         if self.take(&TokenKind::Return) {
-            if self.function_depth == 0 { return Err(self.error("لا يجوز استخدام أرجع خارج الدالة")); }
-            let val = if self.is(&TokenKind::Semicolon) { None } else { Some(self.expression()?) };
+            if self.function_depth == 0 {
+                return Err(self.error("لا يجوز استخدام أرجع خارج الدالة"));
+            }
+            let val = if self.is(&TokenKind::Semicolon) {
+                None
+            } else {
+                Some(self.expression()?)
+            };
             self.semicolon()?;
             return Ok(Stmt::Return(val));
         }
         if self.take(&TokenKind::Break) {
-            if self.loop_depth == 0 { return Err(self.error("لا يجوز استخدام توقف خارج الحلقة")); }
+            if self.loop_depth == 0 {
+                return Err(self.error("لا يجوز استخدام توقف خارج الحلقة"));
+            }
             self.semicolon()?;
             return Ok(Stmt::Break);
         }
         if self.take(&TokenKind::Continue) {
-            if self.loop_depth == 0 { return Err(self.error("لا يجوز استخدام تابع خارج الحلقة")); }
+            if self.loop_depth == 0 {
+                return Err(self.error("لا يجوز استخدام تابع خارج الحلقة"));
+            }
             self.semicolon()?;
             return Ok(Stmt::Continue);
         }
-        if self.is(&TokenKind::LeftBrace) { return Ok(Stmt::Block(self.block()?)); }
+        if self.is(&TokenKind::LeftBrace) {
+            return Ok(Stmt::Block(self.block()?));
+        }
         let expr = self.expression()?;
         self.semicolon()?;
         Ok(Stmt::Expr(expr))
@@ -147,7 +199,9 @@ impl Parser {
     fn semicolon(&mut self) -> Result<(), String> {
         self.expect(&TokenKind::Semicolon, "متوقع ';' أو '؛' في نهاية التعليمة")
     }
-    fn expression(&mut self) -> Result<Expr, String> { self.assignment() }
+    fn expression(&mut self) -> Result<Expr, String> {
+        self.assignment()
+    }
     fn assignment(&mut self) -> Result<Expr, String> {
         let lhs = self.or()?;
         if self.take(&TokenKind::Equal) {
@@ -160,7 +214,9 @@ impl Parser {
                 },
                 _ => Err(self.error("الطرف الأيسر للإسناد يجب أن يكون اسم متغير")),
             }
-        } else { Ok(lhs) }
+        } else {
+            Ok(lhs)
+        }
     }
     fn or(&mut self) -> Result<Expr, String> {
         let mut expr = self.and()?;
@@ -179,9 +235,13 @@ impl Parser {
     fn equality(&mut self) -> Result<Expr, String> {
         let mut expr = self.comparison()?;
         loop {
-            let op = if self.take(&TokenKind::EqualEqual) { Op::Equal }
-                else if self.take(&TokenKind::BangEqual) { Op::NotEqual }
-                else { break };
+            let op = if self.take(&TokenKind::EqualEqual) {
+                Op::Equal
+            } else if self.take(&TokenKind::BangEqual) {
+                Op::NotEqual
+            } else {
+                break;
+            };
             expr = Expr::Binary(Box::new(expr), op, Box::new(self.comparison()?));
         }
         Ok(expr)
@@ -189,11 +249,17 @@ impl Parser {
     fn comparison(&mut self) -> Result<Expr, String> {
         let mut expr = self.term()?;
         loop {
-            let op = if self.take(&TokenKind::Less) { Op::Less }
-                else if self.take(&TokenKind::LessEqual) { Op::LessEqual }
-                else if self.take(&TokenKind::Greater) { Op::Greater }
-                else if self.take(&TokenKind::GreaterEqual) { Op::GreaterEqual }
-                else { break };
+            let op = if self.take(&TokenKind::Less) {
+                Op::Less
+            } else if self.take(&TokenKind::LessEqual) {
+                Op::LessEqual
+            } else if self.take(&TokenKind::Greater) {
+                Op::Greater
+            } else if self.take(&TokenKind::GreaterEqual) {
+                Op::GreaterEqual
+            } else {
+                break;
+            };
             expr = Expr::Binary(Box::new(expr), op, Box::new(self.term()?));
         }
         Ok(expr)
@@ -201,9 +267,13 @@ impl Parser {
     fn term(&mut self) -> Result<Expr, String> {
         let mut expr = self.factor()?;
         loop {
-            let op = if self.take(&TokenKind::Plus) { Op::Add }
-                else if self.take(&TokenKind::Minus) { Op::Subtract }
-                else { break };
+            let op = if self.take(&TokenKind::Plus) {
+                Op::Add
+            } else if self.take(&TokenKind::Minus) {
+                Op::Subtract
+            } else {
+                break;
+            };
             expr = Expr::Binary(Box::new(expr), op, Box::new(self.factor()?));
         }
         Ok(expr)
@@ -211,24 +281,37 @@ impl Parser {
     fn factor(&mut self) -> Result<Expr, String> {
         let mut expr = self.unary()?;
         loop {
-            let op = if self.take(&TokenKind::Star) { Op::Multiply }
-                else if self.take(&TokenKind::Slash) { Op::Divide }
-                else if self.take(&TokenKind::Percent) { Op::Modulo }
-                else { break };
+            let op = if self.take(&TokenKind::Star) {
+                Op::Multiply
+            } else if self.take(&TokenKind::Slash) {
+                Op::Divide
+            } else if self.take(&TokenKind::Percent) {
+                Op::Modulo
+            } else {
+                break;
+            };
             expr = Expr::Binary(Box::new(expr), op, Box::new(self.unary()?));
         }
         Ok(expr)
     }
     fn unary(&mut self) -> Result<Expr, String> {
-        if self.take(&TokenKind::Bang) { return Ok(Expr::Unary(Op::Not, Box::new(self.unary()?))); }
-        if self.take(&TokenKind::Minus) { return Ok(Expr::Unary(Op::Negate, Box::new(self.unary()?))); }
+        if self.take(&TokenKind::Bang) {
+            return Ok(Expr::Unary(Op::Not, Box::new(self.unary()?)));
+        }
+        if self.take(&TokenKind::Minus) {
+            return Ok(Expr::Unary(Op::Negate, Box::new(self.unary()?)));
+        }
         self.power()
     }
     fn power(&mut self) -> Result<Expr, String> {
         let base = self.call()?;
         if self.take(&TokenKind::Power) {
             // Right associative: 2 ** 3 ** 2 == 512.
-            return Ok(Expr::Binary(Box::new(base), Op::Power, Box::new(self.unary()?)));
+            return Ok(Expr::Binary(
+                Box::new(base),
+                Op::Power,
+                Box::new(self.unary()?),
+            ));
         }
         Ok(base)
     }
@@ -241,12 +324,16 @@ impl Parser {
                 expr = Expr::Index(Box::new(expr), Box::new(index));
                 continue;
             }
-            if !self.take(&TokenKind::LeftParen) { break; }
+            if !self.take(&TokenKind::LeftParen) {
+                break;
+            }
             let mut args = Vec::new();
             if !self.is(&TokenKind::RightParen) {
                 loop {
                     args.push(self.expression()?);
-                    if !self.take(&TokenKind::Comma) { break; }
+                    if !self.take(&TokenKind::Comma) {
+                        break;
+                    }
                 }
             }
             self.expect(&TokenKind::RightParen, "متوقع ')' بعد وسائط الاستدعاء")?;
@@ -260,18 +347,35 @@ impl Parser {
     fn primary(&mut self) -> Result<Expr, String> {
         let kind = self.current().kind.clone();
         match kind {
-            TokenKind::Number(n) => { self.cursor += 1; Ok(Expr::Number(n)) }
-            TokenKind::String(s) => { self.cursor += 1; Ok(Expr::Text(s)) }
-            TokenKind::True => { self.cursor += 1; Ok(Expr::Bool(true)) }
-            TokenKind::False => { self.cursor += 1; Ok(Expr::Bool(false)) }
-            TokenKind::Null => { self.cursor += 1; Ok(Expr::Null) }
+            TokenKind::Number(n) => {
+                self.cursor += 1;
+                Ok(Expr::Number(n))
+            }
+            TokenKind::String(s) => {
+                self.cursor += 1;
+                Ok(Expr::Text(s))
+            }
+            TokenKind::True => {
+                self.cursor += 1;
+                Ok(Expr::Bool(true))
+            }
+            TokenKind::False => {
+                self.cursor += 1;
+                Ok(Expr::Bool(false))
+            }
+            TokenKind::Null => {
+                self.cursor += 1;
+                Ok(Expr::Null)
+            }
             TokenKind::LeftBracket => {
                 self.cursor += 1;
                 let mut items = Vec::new();
                 if !self.is(&TokenKind::RightBracket) {
                     loop {
                         items.push(self.expression()?);
-                        if !self.take(&TokenKind::Comma) { break; }
+                        if !self.take(&TokenKind::Comma) {
+                            break;
+                        }
                     }
                 }
                 self.expect(&TokenKind::RightBracket, "متوقع ']' لإنهاء القائمة")?;
@@ -283,19 +387,31 @@ impl Parser {
                 if !self.is(&TokenKind::RightBrace) {
                     loop {
                         let key = match self.current().kind.clone() {
-                            TokenKind::String(key) => { self.cursor += 1; key },
-                            _ => return Err(self.error("يجب أن يكون مفتاح القاموس نصًا بين علامتي اقتباس")),
+                            TokenKind::String(key) => {
+                                self.cursor += 1;
+                                key
+                            }
+                            _ => {
+                                return Err(
+                                    self.error("يجب أن يكون مفتاح القاموس نصًا بين علامتي اقتباس")
+                                )
+                            }
                         };
                         self.expect(&TokenKind::Colon, "متوقع ':' بعد مفتاح القاموس")?;
                         let value = self.expression()?;
                         pairs.push((key, value));
-                        if !self.take(&TokenKind::Comma) { break; }
+                        if !self.take(&TokenKind::Comma) {
+                            break;
+                        }
                     }
                 }
                 self.expect(&TokenKind::RightBrace, "متوقع '}' لإغلاق القاموس")?;
                 Ok(Expr::Map(pairs))
             }
-            TokenKind::Identifier(s) => { self.cursor += 1; Ok(Expr::Variable(s)) }
+            TokenKind::Identifier(s) => {
+                self.cursor += 1;
+                Ok(Expr::Variable(s))
+            }
             TokenKind::LeftParen => {
                 self.cursor += 1;
                 let expr = self.expression()?;
@@ -306,3 +422,6 @@ impl Parser {
         }
     }
 }
+
+mod located;
+pub use located::parse_located;

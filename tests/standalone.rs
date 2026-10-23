@@ -13,9 +13,7 @@ fn emits_valid_program_code_for_imported_app() {
 }
 
 #[test]
-fn compiles_and_executes_standalone_binary() {
-    // Only execute a nested compilation when Cargo is available (as in CI runners).
-    if Command::new("cargo").arg("--version").output().is_err() { return; }
+fn compiles_and_executes_legacy_frozen_ast_binary() {
     let name = format!("lisan_standalone_test_{}_{}", std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     let dir = std::env::temp_dir().join(name);

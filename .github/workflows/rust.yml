@@ -1,4 +1,4 @@
-name: Rust CI
+name: Rust native CI
 on: [push, pull_request, workflow_dispatch]
 
 jobs:
@@ -6,103 +6,91 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run unit and integration tests
-        run: cargo test --all-targets
-      - name: Compile and execute real native Lisan binary (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          command -v clang
-          cargo run -- --emit-llvm examples/native.lsn --output native.ll
-          grep -F 'define i32 @main' native.ll
-          cargo run -- --native examples/native.lsn --output native-sample
-          printf '0\n1\n9\n16\nانتهى\n' > expected-native.txt
-          ./native-sample > actual-native.txt
-          diff -u expected-native.txt actual-native.txt
-          file native-sample
-      - name: Compile and run native collections and arithmetic (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          cargo run -- --native examples/native_collections.lsn --output native-collections
-          ./native-collections > native-collections.out
-          printf 'مجموع القيم = 65\nعدد الحروف = 4\n5\n3\n1\nنجحت الاختبارات الأصلية\n' > expected-collections.out
-          diff -u expected-collections.out native-collections.out
-          cargo run -- --native examples/native_math.lsn --output native-math
-          ./native-math | grep -F 'لغة لسان 8'
-      - name: Upload native collections and mathematics samples (Linux)
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
-          name: lisan-native-0.8-samples-Linux
-          path: |
-            native-collections
-            native-math
-          if-no-files-found: error
-      - name: Upload generated native Lisan sample (Linux)
+          toolchain: 1.75.0
+      - name: Provision Linux Clang 18
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lisan-genuine-native-Linux
-          path: native-sample
-      - name: Compile optimized interpreter
-        run: cargo build --release
-      - name: Run Arabic samples
         run: |
-          cargo run -- --interpret examples/hello.lsn
-          cargo run -- --interpret examples/dictionary.lsn
-          cargo run -- --interpret examples/standard_library.lsn
-          cargo run -- --tokens examples/dictionary.lsn
-          cargo run -- --ast examples/dictionary.lsn
-          cargo run -- --interpret examples/functions.lsn
-          cargo run -- --interpret examples/lists.lsn
-          cargo run -- --interpret examples/text.lsn
-          cargo run -- --interpret examples/modules/main.lsn
-          cargo run -- --check examples/modules/main.lsn
-          cargo run -- --test examples/testing.lsn
-      - name: Build a standalone Lisan sample (Linux/macOS)
-        if: runner.os != 'Windows'
+          sudo apt-get update
+          sudo apt-get install --yes clang-18 libclang-rt-18-dev build-essential
+          echo 'LISAN_CLANG=clang-18' >> "$GITHUB_ENV"
+      - name: Provision Windows MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+      - name: Provision Windows Clang 18
+        if: runner.os == 'Windows'
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2
+        with:
+          version: '18.1.8'
+          arch: x64
+      - name: Validate Linux native compilation and execution
+        if: runner.os == 'Linux'
+        run: sh scripts/check-linux.sh
+      - name: Validate Windows native compilation and execution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-windows.ps1
+      - name: Compile native release samples (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          cargo run -- --build examples/modules/main.lsn --output standalone-sample
-          ./standalone-sample | grep -F 'مربع 7 = 49'
-      - name: Build a standalone Lisan sample (Windows)
+          mkdir -p dist
+          for sample in native native_collections native_math native_typed native_text native_text_control native_text_functions native_managed_lists; do
+            ./target/release/lisan --native "examples/$sample.lsn" --output "dist/$sample"
+            "./dist/$sample"
+          done
+          ./target/release/lisan --native examples/ffi/import.lsn --link examples/ffi/adapter.c --output dist/native-ffi
+          ./dist/native-ffi
+          ./target/release/lisan --emit-object examples/ffi/library.lsn --output dist/lisan-library.o
+          cp target/release/lisan dist/
+          mkdir -p dist/docs dist/examples
+          cp LICENSE README.md dist/
+          cp docs/NATIVE-TYPES.md docs/MEMORY-POINTERS.md docs/MANAGED-VALUES.md docs/STDLIB-STATUS.md dist/docs/
+          cp -R examples/ffi dist/examples/
+          cp examples/native_typed.lsn examples/native_text.lsn examples/native_text_control.lsn examples/native_text_functions.lsn examples/native_managed_lists.lsn dist/examples/
+          cp -R runtime dist/
+          tar -czf lisan-native-Linux.tar.gz -C dist .
+          sha256sum lisan-native-Linux.tar.gz > lisan-native-Linux.sha256
+      - name: Compile native release samples (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cargo run -- --build examples/modules/main.lsn --output standalone-sample.exe
-          $actual = & .\standalone-sample.exe
-          if ($LASTEXITCODE -ne 0 -or $actual -ne 'مربع 7 = 49') { throw "Standalone sample failed: $actual" }
-      - name: Package standalone Arabic sample (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: tar -czf lisan-sample-${{ runner.os }}.tar.gz standalone-sample
-      - name: Package standalone Arabic sample (Windows)
-        if: runner.os == 'Windows'
-        run: Compress-Archive -Path standalone-sample.exe -DestinationPath lisan-sample-Windows.zip
-      - name: Upload standalone Arabic application
-        uses: actions/upload-artifact@v4
+          New-Item -ItemType Directory -Path dist | Out-Null
+          foreach ($sample in @('native', 'native_collections', 'native_math', 'native_typed', 'native_text', 'native_text_control', 'native_text_functions', 'native_managed_lists')) {
+            & ./target/release/lisan.exe --native "examples/$sample.lsn" --output "dist/$sample.exe"
+            if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $sample" }
+            & "./dist/$sample.exe"
+            if ($LASTEXITCODE -ne 0) { throw "Execution failed: $sample" }
+          }
+          & ./target/release/lisan.exe --native examples/ffi/import.lsn --link examples/ffi/adapter.c --output dist/native-ffi.exe
+          if ($LASTEXITCODE -ne 0) { throw 'C FFI compilation failed' }
+          & ./dist/native-ffi.exe
+          if ($LASTEXITCODE -ne 0) { throw 'C FFI execution failed' }
+          & ./target/release/lisan.exe --emit-object examples/ffi/library.lsn --output dist/lisan-library.obj
+          if ($LASTEXITCODE -ne 0) { throw 'Library object compilation failed' }
+          Copy-Item target/release/lisan.exe dist/
+          New-Item -ItemType Directory -Path dist/docs,dist/examples | Out-Null
+          Copy-Item LICENSE,README.md dist/
+          Copy-Item docs/NATIVE-TYPES.md,docs/MEMORY-POINTERS.md,docs/MANAGED-VALUES.md,docs/STDLIB-STATUS.md dist/docs/
+          Copy-Item -Recurse examples/ffi dist/examples/
+          Copy-Item examples/native_typed.lsn,examples/native_text.lsn,examples/native_text_control.lsn,examples/native_text_functions.lsn,examples/native_managed_lists.lsn dist/examples/
+          Copy-Item -Recurse runtime dist/
+          Compress-Archive -Path dist/* -DestinationPath lisan-native-Windows.zip
+          $hash = (Get-FileHash lisan-native-Windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  lisan-native-Windows.zip" | Set-Content -Encoding ascii lisan-native-Windows.sha256
+      - name: Upload native compiler and machine code samples
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: lisan-standalone-sample-${{ runner.os }}
+          name: lisan-native-${{ runner.os }}
           path: |
-            lisan-sample-*.tar.gz
-            lisan-sample-*.zip
-          if-no-files-found: error
-      - name: Package Linux/macOS interpreter
-        if: runner.os != 'Windows'
-        run: tar -czf lisan-${{ runner.os }}.tar.gz -C target/release lisan
-      - name: Package Windows interpreter
-        if: runner.os == 'Windows'
-        run: Compress-Archive -Path target/release/lisan.exe -DestinationPath lisan-Windows.zip
-      - name: Upload ready-to-run interpreter
-        uses: actions/upload-artifact@v4
-        with:
-          name: lisan-${{ runner.os }}
-          path: |
-            lisan-*.tar.gz
-            lisan-*.zip
+            lisan-native-*.tar.gz
+            lisan-native-*.zip
+            lisan-native-*.sha256
           if-no-files-found: error
